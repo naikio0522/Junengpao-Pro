@@ -148,6 +148,10 @@ jobs:
         run: |
           $tag = $env:RELEASE_TAG
           $installer = Get-Item -LiteralPath "frontend/release/巨能跑pro版.Setup.$env:RELEASE_VERSION.exe"
+          # GitHub strips non-ASCII release asset filename characters. Publish
+          # under the stable ASCII compatibility name accepted by 0.x clients.
+          $releaseAsset = Join-Path $installer.DirectoryName "VideoMatrix.Setup.$env:RELEASE_VERSION.exe"
+          Copy-Item -LiteralPath $installer.FullName -Destination $releaseAsset
           $releasesJson = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100"
           if ($LASTEXITCODE -ne 0) { throw "Could not check for existing release $tag" }
           $releases = ($releasesJson | Out-String) | ConvertFrom-Json
@@ -159,7 +163,7 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or $mainHead -ne $env:GITHUB_SHA) {
             throw "This build was superseded by another main commit; refusing to publish $tag."
           }
-          gh release create $tag $installer.FullName --repo $env:GITHUB_REPOSITORY `
+          gh release create $tag $releaseAsset --repo $env:GITHUB_REPOSITORY `
             --target $env:GITHUB_SHA --title "巨能跑pro版 $env:RELEASE_VERSION" `
             --notes "Self-contained Windows installer (Electron + FastAPI + ffmpeg, no Python required)."
           if ($LASTEXITCODE -ne 0) { throw "Could not publish Windows installer for $tag" }

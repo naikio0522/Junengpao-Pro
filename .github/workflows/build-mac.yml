@@ -161,8 +161,9 @@ jobs:
           # A draft release is not addressable by tag through the release API.
           # Windows creates the public release with its installer; wait for it.
           for attempt in {1..80}; do
-            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              break
+            if published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+              --jq '(.draft == false and .prerelease == false)' 2>/dev/null); then
+              if [[ "$published" == true ]]; then break; fi
             fi
             if [[ "$attempt" == 80 ]]; then
               echo "Windows did not publish $tag within 20 minutes." >&2
@@ -170,19 +171,16 @@ jobs:
             fi
             sleep 15
           done
-          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-            --jq '(.draft == false and .prerelease == false)')
-          if [[ "$published" != true ]]; then
-            echo "Release $tag is not public and stable." >&2
-            exit 1
-          fi
           target_sha=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.target_commitish')
           if [[ "$target_sha" != "$GITHUB_SHA" ]]; then
             echo "Release $tag targets $target_sha, not this build's $GITHUB_SHA; refusing to mix builds." >&2
             exit 1
           fi
-          name="巨能跑pro版.Setup.${RELEASE_VERSION}.dmg"
+          original="frontend/release/巨能跑pro版.Setup.${RELEASE_VERSION}.dmg"
+          name="VideoMatrix.Setup.${RELEASE_VERSION}-mac.dmg"
           dmg="frontend/release/$name"
+          test -f "$original"
+          cp "$original" "$dmg"
           test -f "$dmg"
           assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
           if printf '%s\n' "$assets" | grep -Fx "$name" >/dev/null; then
@@ -190,7 +188,7 @@ jobs:
             exit 1
           fi
           gh release upload "$tag" "$dmg" --repo "$GITHUB_REPOSITORY"
-          windows_name="巨能跑pro版.Setup.${RELEASE_VERSION}.exe"
+          windows_name="VideoMatrix.Setup.${RELEASE_VERSION}.exe"
           assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
           if ! printf '%s\n' "$assets" | grep -Fx "$windows_name" >/dev/null; then
             echo "Published release $tag has no Windows installer; cannot refresh its update channel." >&2
