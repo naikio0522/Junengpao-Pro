@@ -1,0 +1,81 @@
+name: Publish 巨能跑pro版 0.x update channel
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: 'Published v0.x.y release to add to the update channel'
+        required: true
+        type: string
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Published v0.x.y release to refresh after attaching an installer'
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: videomatrix-update-channel-0
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: ${{ github.event_name != 'release' || (startsWith(github.event.release.tag_name, 'v0.') && !github.event.release.prerelease) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Read published release and existing channel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > "$RUNNER_TEMP/release.json"
+          mkdir -p "$RUNNER_TEMP/previous"
+          status=$(curl --silent --show-error --location --retry 3 --retry-all-errors \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header 'Accept: application/vnd.github+json' \
+            --output "$RUNNER_TEMP/previous-release.json" --write-out '%{http_code}' \
+            "https://api.github.com/repos/$GITHUB_REPOSITORY/releases/tags/update-channel-0")
+          case "$status" in
+            200)
+              node frontend/scripts/verify-existing-channel.cjs "$RUNNER_TEMP/previous-release.json"
+              gh release download update-channel-0 --repo "$GITHUB_REPOSITORY" \
+                --pattern '*.json' --dir "$RUNNER_TEMP/previous"
+              node frontend/scripts/verify-existing-channel.cjs \
+                "$RUNNER_TEMP/previous-release.json" "$RUNNER_TEMP/previous"
+              ;;
+            404)
+              echo '0.x update channel does not exist yet; this is its first publication.'
+              ;;
+            *)
+              echo "Cannot inspect existing 0.x channel (HTTP $status); refusing to publish." >&2
+              exit 1
+              ;;
+          esac
+      - name: Validate published installers and generate per-platform 0.x manifests
+        run: |
+          node frontend/scripts/generate-update-channel.cjs \
+            "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/channel" \
+            "$RUNNER_TEMP/previous"
+      - name: Publish dedicated metadata assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! compgen -G "$RUNNER_TEMP/channel/*.json" >/dev/null; then
+            echo 'No newer platform manifest to publish.'
+            exit 0
+          fi
+          if ! gh release view update-channel-0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create update-channel-0 --repo "$GITHUB_REPOSITORY" --prerelease \
+              --title '巨能跑pro版 0.x 更新通道（元数据）' \
+              --notes '0.x 独立更新通道；安装包仍在各版本的正式 Release 中。'
+          fi
+          gh release upload update-channel-0 "$RUNNER_TEMP/channel/"*.json \
+            --repo "$GITHUB_REPOSITORY" --clobber

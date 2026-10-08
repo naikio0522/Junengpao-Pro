@@ -1,0 +1,196 @@
+name: Build 巨能跑pro版 Installer (macOS)
+
+# Self-contained macOS .dmg for the Electron + FastAPI + ffmpeg architecture.
+# Same recipe as the Windows workflow, only the platform-specific binaries
+# differ. Users mount the dmg and drag-drop into Applications — no Python
+# or Homebrew needed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (optional; defaults to v<frontend/package.json version>)"
+        required: false
+        default: ""
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-latest
+    outputs:
+      release_tag: ${{ steps.release_meta.outputs.release_tag }}
+      refresh_channel: ${{ steps.upload_release.outputs.refresh_channel }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Validate 0.x release version
+        id: release_meta
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./frontend/package.json').version")
+          if [[ ! "$version" =~ ^0\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Only stable 0.x versions can be published: $version" >&2
+            exit 1
+          fi
+          tag="v$version"
+          if [[ "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF_TYPE" == tag && "$GITHUB_REF_NAME" != "$tag" ]]; then
+            echo "Pushed tag $GITHUB_REF_NAME does not match package version $tag" >&2
+            exit 1
+          fi
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && -n "$REQUESTED_TAG" && "$REQUESTED_TAG" != "$tag" ]]; then
+            echo "Requested tag $REQUESTED_TAG does not match package version $tag" >&2
+            exit 1
+          fi
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      # ── Python toolchain ─────────────────────────────────────────────────
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install backend deps + PyInstaller
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pytest
+
+      - name: Cache offline speech model for packaging
+        working-directory: backend
+        run: python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-base', revision='ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66')"
+
+      # ── Bundle macOS FFmpeg / FFprobe ───────────────────────────────────
+      - name: Download FFmpeg static build
+        run: |
+          mkdir -p backend/ffmpeg
+          curl -L https://evermeet.cx/ffmpeg/getrelease/zip  -o ffmpeg.zip
+          curl -L https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip -o ffprobe.zip
+          unzip -o ffmpeg.zip  -d backend/ffmpeg
+          unzip -o ffprobe.zip -d backend/ffmpeg
+          chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
+
+      - name: Test backend regressions
+        working-directory: backend
+        run: python -m pytest tests -q
+
+      # ── Backend → single self-contained binary ───────────────────────────
+      - name: Build backend binary
+        working-directory: backend
+        run: pyinstaller --clean videomatrix-backend.spec
+
+      - name: Verify packaged backend identity, shutdown and offline ASR
+        working-directory: backend
+        run: VIDEOMATRIX_TEST_BINARY="$PWD/dist/videomatrix-backend" python -m pytest tests/test_runtime_startup.py tests/test_packaged_offline_asr.py -q
+
+      # ── Frontend dependencies and bundle ────────────────────────────────
+      - name: Install frontend deps
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build renderer / main / preload
+        working-directory: frontend
+        run: |
+          node --test tests/runtime.test.cjs tests/update-channel.test.cjs
+          npm run build
+
+      # ── Package as .dmg (extraResources pulls backend exe in automatically)
+      - name: Generate macOS icon
+        working-directory: frontend
+        run: |
+          mkdir -p build/icon.iconset
+          sips -z 16 16     public/icon.png --out build/icon.iconset/icon_16x16.png
+          sips -z 32 32     public/icon.png --out build/icon.iconset/icon_16x16@2x.png
+          sips -z 32 32     public/icon.png --out build/icon.iconset/icon_32x32.png
+          sips -z 64 64     public/icon.png --out build/icon.iconset/icon_32x32@2x.png
+          sips -z 128 128   public/icon.png --out build/icon.iconset/icon_128x128.png
+          sips -z 256 256   public/icon.png --out build/icon.iconset/icon_128x128@2x.png
+          sips -z 256 256   public/icon.png --out build/icon.iconset/icon_256x256.png
+          sips -z 512 512   public/icon.png --out build/icon.iconset/icon_256x256@2x.png
+          sips -z 512 512   public/icon.png --out build/icon.iconset/icon_512x512.png
+          sips -z 1024 1024 public/icon.png --out build/icon.iconset/icon_512x512@2x.png
+          iconutil -c icns build/icon.iconset -o build/icon.icns
+
+      - name: Package Electron app
+        working-directory: frontend
+        env:
+          # skip code signing in CI — release will be ad-hoc signed
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: npx electron-builder --mac --publish never
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoMatrix-mac-dmg
+          path: frontend/release/*.dmg
+
+      - name: Upload macOS DMG to GitHub Release
+        id: upload_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.release_tag }}
+          RELEASE_VERSION: ${{ steps.release_meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            # Windows and macOS builds may finish together. If another job just
+            # created this draft, reuse it instead of treating the race as fatal.
+            if ! gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --draft --title "巨能跑pro版 $RELEASE_VERSION" \
+              --notes "Self-contained macOS dmg (Electron + FastAPI + ffmpeg, no Python required)."; then
+              gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+            fi
+          fi
+          name="巨能跑pro版.Setup.${RELEASE_VERSION}.dmg"
+          dmg="frontend/release/$name"
+          test -f "$dmg"
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
+          if printf '%s\n' "$assets" | grep -Fx "$name" >/dev/null; then
+            echo "Release $tag already contains $name; refusing to overwrite an existing DMG." >&2
+            exit 1
+          fi
+          gh release upload "$tag" "$dmg" --repo "$GITHUB_REPOSITORY"
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            --jq '(.draft == false and .prerelease == false)')
+          if [[ "$published" == true ]]; then
+            windows_name="巨能跑pro版.Setup.${RELEASE_VERSION}.exe"
+            assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
+            if ! printf '%s\n' "$assets" | grep -Fx "$windows_name" >/dev/null; then
+              echo "Published release $tag has no Windows installer; cannot refresh its update channel." >&2
+              exit 1
+            fi
+            echo 'refresh_channel=true' >> "$GITHUB_OUTPUT"
+          else
+            # Windows publishes the draft after its installer is uploaded and
+            # then calls the same reusable update-channel workflow.
+            echo 'refresh_channel=false' >> "$GITHUB_OUTPUT"
+          fi
+
+  publish-channel:
+    needs: build
+    if: needs.build.outputs.refresh_channel == 'true'
+    uses: ./.github/workflows/publish-update-channel.yml
+    with:
+      release_tag: ${{ needs.build.outputs.release_tag }}
+    permissions:
+      contents: write

@@ -1,0 +1,13 @@
+Bundled offline speech recognition model
+
+Inference engine: SYSTRAN/faster-whisper 1.2.1
+Source: https://github.com/SYSTRAN/faster-whisper
+
+Model weights: Systran/faster-whisper-base
+Source: https://huggingface.co/Systran/faster-whisper-base
+Revision: ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66
+License listed by the model publisher: MIT
+
+The model runs locally from the application bundle. The application does not
+upload source videos to a transcription service. Transcriptions may contain
+errors and should be reviewed before publishing a finished video.
