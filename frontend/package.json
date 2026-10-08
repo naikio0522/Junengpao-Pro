@@ -61,6 +61,13 @@
           "videomatrix-backend",
           "videomatrix-backend.exe"
         ]
+      },
+      {
+        "from": "third-party/ffmpeg",
+        "to": "licenses/ffmpeg",
+        "filter": [
+          "**/*"
+        ]
       }
     ],
     "win": {

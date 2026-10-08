@@ -1,0 +1,29 @@
+FFmpeg / FFprobe third-party notice
+===================================
+
+This application bundles and runs separate FFmpeg and FFprobe executables.
+These executables are third-party software; the application's MIT license
+does not replace the licenses that apply to them.
+
+Windows x64:
+  FFmpeg 8.1.1 full static build by Gyan Doshi, distributed under GPLv3.
+  Binary release: https://github.com/GyanD/codexffmpeg/releases/tag/8.1.1
+  FFmpeg 8.1.1 source: https://ffmpeg.org/releases/ffmpeg-8.1.1.tar.xz
+  Builder information: https://www.gyan.dev/ffmpeg/builds/
+
+macOS arm64:
+  FFmpeg/FFprobe 6.1.1 binaries republished by eugeneware/ffmpeg-static.
+  Binary release and build-specific license:
+    https://github.com/eugeneware/ffmpeg-static/releases/tag/b6.1.1
+  FFmpeg 6.1.1 source: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+  The upstream darwin-arm64.LICENSE is included alongside this notice.
+  That file describes FFmpeg's LGPLv2.1+ base license and optional GPLv2+
+  components; the exact executable's terms depend on its configure options.
+  Run the bundled ffmpeg or ffprobe with -L to see its compiled-in license.
+
+The complete GPLv2 and GPLv3 license texts are included here as
+COPYING.GPLv2 and COPYING.GPLv3. FFmpeg's own license information is at
+https://ffmpeg.org/legal.html. Sources for libraries statically linked into
+the particular third-party binaries may have their own licenses and source
+obligations; the FFmpeg source archives alone are not necessarily the full
+corresponding source for those binaries.

@@ -79,15 +79,21 @@ jobs:
         working-directory: backend
         run: python -c "from huggingface_hub import snapshot_download; snapshot_download('Systran/faster-whisper-base', revision='ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66')"
 
-      # ── Bundle macOS FFmpeg / FFprobe ───────────────────────────────────
-      - name: Download FFmpeg static build
+      # ── Bundle verified ARM64 FFmpeg / FFprobe ──────────────────────────
+      - name: Download and verify FFmpeg static build
         run: |
+          set -euo pipefail
           mkdir -p backend/ffmpeg
-          curl -L https://evermeet.cx/ffmpeg/getrelease/zip  -o ffmpeg.zip
-          curl -L https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip -o ffprobe.zip
-          unzip -o ffmpeg.zip  -d backend/ffmpeg
-          unzip -o ffprobe.zip -d backend/ffmpeg
+          base=https://github.com/eugeneware/ffmpeg-static/releases/download/b6.1.1
+          curl -fL --retry 3 "$base/ffmpeg-darwin-arm64" -o backend/ffmpeg/ffmpeg
+          curl -fL --retry 3 "$base/ffprobe-darwin-arm64" -o backend/ffmpeg/ffprobe
+          echo 'a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584  backend/ffmpeg/ffmpeg' | shasum -a 256 --check
+          echo 'bb2db6f5d8cef919da12fbf592119a987202a8c060a886f3cab091f9cab90b64  backend/ffmpeg/ffprobe' | shasum -a 256 --check
           chmod +x backend/ffmpeg/ffmpeg backend/ffmpeg/ffprobe
+          file backend/ffmpeg/ffmpeg | grep -F 'arm64'
+          file backend/ffmpeg/ffprobe | grep -F 'arm64'
+          backend/ffmpeg/ffmpeg -hide_banner -encoders | grep -F 'libx264'
+          backend/ffmpeg/ffmpeg -hide_banner -filters | grep -F 'subtitles'
 
       - name: Test backend regressions
         working-directory: backend
@@ -152,14 +158,28 @@ jobs:
         run: |
           set -euo pipefail
           tag="$RELEASE_TAG"
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # Windows and macOS builds may finish together. If another job just
-            # created this draft, reuse it instead of treating the race as fatal.
-            if ! gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" --draft --title "巨能跑pro版 $RELEASE_VERSION" \
-              --notes "Self-contained macOS dmg (Electron + FastAPI + ffmpeg, no Python required)."; then
-              gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null
+          # A draft release is not addressable by tag through the release API.
+          # Windows creates the public release with its installer; wait for it.
+          for attempt in {1..80}; do
+            if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              break
             fi
+            if [[ "$attempt" == 80 ]]; then
+              echo "Windows did not publish $tag within 20 minutes." >&2
+              exit 1
+            fi
+            sleep 15
+          done
+          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
+            --jq '(.draft == false and .prerelease == false)')
+          if [[ "$published" != true ]]; then
+            echo "Release $tag is not public and stable." >&2
+            exit 1
+          fi
+          target_sha=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.target_commitish')
+          if [[ "$target_sha" != "$GITHUB_SHA" ]]; then
+            echo "Release $tag targets $target_sha, not this build's $GITHUB_SHA; refusing to mix builds." >&2
+            exit 1
           fi
           name="巨能跑pro版.Setup.${RELEASE_VERSION}.dmg"
           dmg="frontend/release/$name"
@@ -170,21 +190,13 @@ jobs:
             exit 1
           fi
           gh release upload "$tag" "$dmg" --repo "$GITHUB_REPOSITORY"
-          published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
-            --jq '(.draft == false and .prerelease == false)')
-          if [[ "$published" == true ]]; then
-            windows_name="巨能跑pro版.Setup.${RELEASE_VERSION}.exe"
-            assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
-            if ! printf '%s\n' "$assets" | grep -Fx "$windows_name" >/dev/null; then
-              echo "Published release $tag has no Windows installer; cannot refresh its update channel." >&2
-              exit 1
-            fi
-            echo 'refresh_channel=true' >> "$GITHUB_OUTPUT"
-          else
-            # Windows publishes the draft after its installer is uploaded and
-            # then calls the same reusable update-channel workflow.
-            echo 'refresh_channel=false' >> "$GITHUB_OUTPUT"
+          windows_name="巨能跑pro版.Setup.${RELEASE_VERSION}.exe"
+          assets=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq '.assets[].name')
+          if ! printf '%s\n' "$assets" | grep -Fx "$windows_name" >/dev/null; then
+            echo "Published release $tag has no Windows installer; cannot refresh its update channel." >&2
+            exit 1
           fi
+          echo 'refresh_channel=true' >> "$GITHUB_OUTPUT"
 
   publish-channel:
     needs: build
