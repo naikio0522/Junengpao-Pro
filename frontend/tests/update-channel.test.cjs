@@ -69,8 +69,9 @@ test('check update reports unpublished 0.x channel on 404 and never checks from 
   assert.equal(missingChannel.status, 'unpublished')
   assert.match(missingChannel.message, /0.x 更新通道尚未发布/)
   const requestedManifest = new URL(requestedUrl)
+  const platformManifest = process.platform === 'darwin' ? 'macos.json' : 'windows.json'
   assert.equal(`${requestedManifest.origin}${requestedManifest.pathname}`,
-    `${releaseBase}/update-channel-0/windows.json`)
+    `${releaseBase}/update-channel-0/${platformManifest}`)
 
   requestedUrl = ''
   const oldUpdater = loadUpdaterWithVersion('2.4.2', request)
