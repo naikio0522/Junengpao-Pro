@@ -76,8 +76,8 @@ export function CheckUpdatesButton() {
           <button type="button" onClick={() => setOpen(false)} aria-label="关闭更新面板" className="text-muted-foreground hover:text-foreground">关闭</button>
         </div>
         {checking && <p className="mt-2 text-accent">正在检查是否为最新版本...</p>}
-        {result?.status === 'available' && <div className="mt-2 space-y-2">
-          <p>发现新版本：v{result.update.version}（当前 v{result.currentVersion}）</p>
+        {(result?.status === 'available' || result?.status === 'required') && <div className="mt-2 space-y-2">
+          <p>{result.status === 'required' ? '当前版本需要更新' : '发现新版本'}：v{result.update.version}（当前 v{result.currentVersion}）</p>
           {!!result.update.notes && <p className="max-h-24 overflow-auto whitespace-pre-wrap text-muted-foreground">{result.update.notes}</p>}
           <button type="button" onClick={() => void install()} disabled={downloading}
             className="rounded-[4px] bg-accent px-3 py-1.5 font-semibold text-background disabled:opacity-50">

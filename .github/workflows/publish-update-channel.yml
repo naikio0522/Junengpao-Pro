@@ -7,6 +7,14 @@ on:
         description: 'Published v0.x.y release to add to the update channel'
         required: true
         type: string
+      minimum_windows_version:
+        description: 'Optional Windows minimum supported 0.x.y version; none disables the policy'
+        required: false
+        type: string
+      minimum_macos_version:
+        description: 'Optional macOS minimum supported 0.x.y version; none disables the policy'
+        required: false
+        type: string
   release:
     types: [published]
   workflow_dispatch:
@@ -14,6 +22,12 @@ on:
       release_tag:
         description: 'Published v0.x.y release to refresh after attaching an installer'
         required: true
+      minimum_windows_version:
+        description: 'Optional Windows minimum supported 0.x.y version; none disables the policy'
+        required: false
+      minimum_macos_version:
+        description: 'Optional macOS minimum supported 0.x.y version; none disables the policy'
+        required: false
 
 permissions:
   contents: write
@@ -60,6 +74,9 @@ jobs:
               ;;
           esac
       - name: Validate published installers and generate per-platform 0.x manifests
+        env:
+          JNP_MINIMUM_WINDOWS_VERSION: ${{ inputs.minimum_windows_version || '' }}
+          JNP_MINIMUM_MACOS_VERSION: ${{ inputs.minimum_macos_version || '' }}
         run: |
           node frontend/scripts/generate-update-channel.cjs \
             "$RUNNER_TEMP/release.json" "$RUNNER_TEMP/channel" \

@@ -13,11 +13,39 @@ from ..models.schemas import (
 from ..services.task_service import task_service
 from ..core.ffmpeg import probe_media, extract_media_info, extract_audio_duration
 from .standalone_variants import standalone_variant_service
+from .watermark_removal import watermark_removal_service
+from .link_watermark import link_watermark_service
+from .subtitles import active_export_count
 from .accounts import bearer, get_account_service
 from ..services.account_service import AccountService, InvalidSession
 from ..services.remote_account_service import AccountServiceUnavailable, RemoteAccountService
 
 router = APIRouter()
+_auxiliary_work_lock = threading.Lock()
+_active_auxiliary_work = 0
+
+
+def _begin_auxiliary_work():
+    """Track long benchmark/preflight work even after an SSE client disconnects."""
+    global _active_auxiliary_work
+    with _auxiliary_work_lock:
+        _active_auxiliary_work += 1
+    released = False
+
+    def release():
+        nonlocal released
+        global _active_auxiliary_work
+        with _auxiliary_work_lock:
+            if not released:
+                _active_auxiliary_work -= 1
+                released = True
+
+    return release
+
+
+def _auxiliary_work_count():
+    with _auxiliary_work_lock:
+        return _active_auxiliary_work
 
 
 @router.post("/tasks", response_model=CreateTaskResponse)
@@ -39,6 +67,18 @@ def create_task(
 @router.get("/tasks", response_model=list[TaskStatus])
 def list_tasks():
     return task_service.get_all_tasks()
+
+
+@router.get("/tasks/active-count")
+def active_task_count():
+    return {"count": (
+        sum(task.status in ("pending", "running") for task in task_service.get_all_tasks())
+        + standalone_variant_service.active_count()
+        + watermark_removal_service.active_count()
+        + link_watermark_service.active_count()
+        + _auxiliary_work_count()
+        + active_export_count()
+    )}
 
 
 @router.get("/tasks/{task_id}", response_model=TaskStatus)
@@ -149,7 +189,13 @@ def probe_file(file_path: str):
 async def benchmark(config: VideoConfig, request: Request):
     # Keep JSON for older clients; the desktop app opts in to real progress.
     if 'text/event-stream' not in request.headers.get('accept', ''):
-        return await asyncio.to_thread(task_service.get_benchmark, config)
+        release = _begin_auxiliary_work()
+        def run_json_benchmark():
+            try:
+                return task_service.get_benchmark(config)
+            finally:
+                release()
+        return await asyncio.to_thread(run_json_benchmark)
 
     loop = asyncio.get_running_loop()
     events: asyncio.Queue[dict] = asyncio.Queue()
@@ -157,7 +203,7 @@ async def benchmark(config: VideoConfig, request: Request):
     def emit(event: dict):
         loop.call_soon_threadsafe(events.put_nowait, event)
 
-    def run_benchmark():
+    def run_benchmark(release):
         try:
             result = task_service.get_benchmark(
                 config,
@@ -168,9 +214,16 @@ async def benchmark(config: VideoConfig, request: Request):
             emit({'type': 'result', 'result': result})
         except Exception as exc:
             emit({'type': 'error', 'message': str(exc)})
+        finally:
+            release()
 
     async def event_generator():
-        threading.Thread(target=run_benchmark, daemon=True).start()
+        release = _begin_auxiliary_work()
+        try:
+            threading.Thread(target=run_benchmark, args=(release,), daemon=True).start()
+        except Exception:
+            release()
+            raise
         started = loop.time()
         latest_percent = 0
         latest_message = '准备压测素材'
@@ -200,7 +253,13 @@ async def preflight(config: VideoConfig, request: Request):
     # Keep the JSON contract for existing clients. The desktop UI opts in to
     # streaming so it can display real completed-work progress during offline ASR.
     if 'text/event-stream' not in request.headers.get('accept', ''):
-        return await asyncio.to_thread(task_service.preflight, config)
+        release = _begin_auxiliary_work()
+        def run_json_preflight():
+            try:
+                return task_service.preflight(config)
+            finally:
+                release()
+        return await asyncio.to_thread(run_json_preflight)
 
     loop = asyncio.get_running_loop()
     events: asyncio.Queue[dict] = asyncio.Queue()
@@ -208,7 +267,7 @@ async def preflight(config: VideoConfig, request: Request):
     def emit(event: dict):
         loop.call_soon_threadsafe(events.put_nowait, event)
 
-    def run_preflight():
+    def run_preflight(release):
         try:
             result = task_service.preflight(
                 config,
@@ -219,9 +278,16 @@ async def preflight(config: VideoConfig, request: Request):
             emit({'type': 'result', 'result': result})
         except Exception as exc:
             emit({'type': 'error', 'message': str(exc)})
+        finally:
+            release()
 
     async def event_generator():
-        threading.Thread(target=run_preflight, daemon=True).start()
+        release = _begin_auxiliary_work()
+        try:
+            threading.Thread(target=run_preflight, args=(release,), daemon=True).start()
+        except Exception:
+            release()
+            raise
         while True:
             event = await events.get()
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

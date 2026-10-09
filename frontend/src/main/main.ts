@@ -7,7 +7,8 @@ import { randomBytes, randomUUID } from 'crypto'
 import { pathToFileURL } from 'url'
 import { validateIdentity } from './backendHandshake'
 import { resolveAccountBackendConfig } from './accountBackendConfig'
-import { checkForUpdate, downloadAndInstallUpdate } from './releaseUpdater'
+import { checkForUpdate, checkForStartupUpdate, downloadAndInstallUpdate } from './releaseUpdater'
+import { getActiveTaskCount as queryActiveTaskCount, ensureNoActiveTasks as requireIdleTasks } from './activeTaskGuard'
 import { resolvePublicDouyinPlayer } from './douyinPublicPlayer'
 
 declare const __JNP_DESKTOP_ACCOUNT_API_URL__: string
@@ -266,6 +267,16 @@ async function stopBackendTasks(timeoutMs = 2500) {
   }
 }
 
+async function getActiveTaskCount(): Promise<number> {
+  if (!backendVerified) throw new Error('暂时无法确认任务状态，请稍后重试。')
+  return queryActiveTaskCount(backendPort, backendApiToken)
+}
+
+async function ensureNoActiveTasks(): Promise<void> {
+  if (!backendVerified) throw new Error('暂时无法确认任务状态，请稍后重试。')
+  await requireIdleTasks(backendPort, backendApiToken)
+}
+
 async function shutdownApp() {
   if (isQuitting) return
   isQuitting = true
@@ -459,12 +470,15 @@ ipcMain.handle('app:getBackendToken', (event) => {
   return backendApiToken
 })
 ipcMain.handle('app:checkForUpdates', () => checkForUpdate())
+ipcMain.handle('app:checkForStartupUpdate', () => checkForStartupUpdate())
+ipcMain.handle('app:isPackaged', () => app.isPackaged)
+ipcMain.handle('app:getActiveTaskCount', () => getActiveTaskCount())
 ipcMain.handle('app:downloadAndInstallUpdate', async () => {
   if (!mainWindow) throw new Error('窗口尚未就绪，请稍后重试。')
   const owner = mainWindow
   return downloadAndInstallUpdate(owner, progress => {
     if (!owner.isDestroyed()) owner.webContents.send('app:updateDownloadProgress', progress)
-  }, shutdownApp)
+  }, shutdownApp, ensureNoActiveTasks)
 })
 
 // 应用生命周期

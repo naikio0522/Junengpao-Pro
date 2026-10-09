@@ -240,6 +240,10 @@ class LinkWatermarkService:
                 self.events[task_id].set()
             return len(active)
 
+    def active_count(self) -> int:
+        with self.lock:
+            return sum(job['status'] in ('pending', 'running') for job in self.jobs.values())
+
 
 link_watermark_service = LinkWatermarkService()
 

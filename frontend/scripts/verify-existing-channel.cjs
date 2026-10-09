@@ -23,8 +23,21 @@ function verifyExistingChannel(release, directory) {
       throw new Error(`Existing channel manifest was not downloaded: ${name}`)
     }
     const manifest = JSON.parse(fs.readFileSync(filename, 'utf8'))
-    if (manifest.channel !== '0.x' || !/^0\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(manifest.version)) {
+    const parseVersion = value => {
+      if (typeof value !== 'string' || !/^0\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(value)) return null
+      const parts = value.split('.').map(Number)
+      return parts.every(Number.isSafeInteger) ? parts : null
+    }
+    const version = parseVersion(manifest.version)
+    if (manifest.channel !== '0.x' || !version) {
       throw new Error(`Existing channel manifest is invalid: ${name}`)
+    }
+    if (manifest.minimumSupportedVersion !== undefined) {
+      const minimum = parseVersion(manifest.minimumSupportedVersion)
+      if (!minimum || minimum[1] > version[1] ||
+          (minimum[1] === version[1] && minimum[2] > version[2])) {
+        throw new Error(`Existing channel minimum supported version is invalid: ${name}`)
+      }
     }
   }
   return names

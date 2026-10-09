@@ -57,7 +57,7 @@ async function main() {
       await sleep(500)
     }
     assert.match(panelText, /您已经是最新版本啦/)
-    console.log('PASS packaged v0.1.8 UI, update button, and no available update notice')
+    console.log('PASS packaged v0.1.9 UI, update button, and no available update notice')
   } finally {
     socket.close()
   }

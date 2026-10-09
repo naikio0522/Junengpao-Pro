@@ -13,12 +13,15 @@ export interface UpdateAsset {
 export interface UpdateManifest {
   channel: '0.x'
   version: string
+  /** Optional policy for clients that support mandatory updates. */
+  minimumSupportedVersion?: string
   notes?: string
   asset: UpdateAsset
 }
 
 export interface AvailableUpdate {
   version: string
+  minimumSupportedVersion?: string
   notes: string
   url: string
   sha256: string
@@ -54,6 +57,14 @@ export function validateUpdateManifest(value: unknown, platform: UpdatePlatform)
     throw new Error('0.x 更新通道返回了无效版本。')
   }
   const version = data.version!.replace(/^v/, '')
+  const minimumSupportedVersion = data.minimumSupportedVersion
+  if (minimumSupportedVersion !== undefined &&
+      (typeof minimumSupportedVersion !== 'string' ||
+        !/^0\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(minimumSupportedVersion) ||
+        !parseStableZeroVersion(minimumSupportedVersion) ||
+        compareStableZeroVersions(minimumSupportedVersion, version)! > 0)) {
+    throw new Error('0.x 更新通道返回了无效的最低支持版本。')
+  }
   const asset = data.asset
   if (!asset || !/^[0-9a-f]{64}$/i.test(asset.sha256 || '') ||
       !Number.isSafeInteger(asset.size) || asset.size < 1 || asset.size > 3_000_000_000) {
@@ -79,6 +90,7 @@ export function validateUpdateManifest(value: unknown, platform: UpdatePlatform)
   }
   return {
     version,
+    minimumSupportedVersion,
     notes: typeof data.notes === 'string' ? data.notes.slice(0, 2000) : '',
     url: url.toString(),
     sha256: asset.sha256.toLowerCase(),

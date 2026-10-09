@@ -212,6 +212,10 @@ class StandaloneVariantService:
                 self.events[task_id].set()
             return len(active)
 
+    def active_count(self) -> int:
+        with self.lock:
+            return sum(job["status"] in ("pending", "running") for job in self.jobs.values())
+
     def _update(self, task_id: str, **changes) -> None:
         with self.lock:
             self.jobs[task_id].update(changes)

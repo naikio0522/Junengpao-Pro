@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import threading
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -14,6 +15,13 @@ from ..core.speech_transcript import SpeechSegment, SpeechTranscriptService
 router = APIRouter(prefix="/subtitles", tags=["subtitles"])
 _VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 _transcripts = SpeechTranscriptService()
+_export_lock = threading.Lock()
+_active_exports = 0
+
+
+def active_export_count() -> int:
+    with _export_lock:
+        return _active_exports
 
 
 class ExportSrtRequest(BaseModel):
@@ -79,6 +87,9 @@ def export_srt(
 
 @router.post("/srt", response_model=ExportSrtResponse)
 def export_srt_route(request: ExportSrtRequest) -> ExportSrtResponse:
+    global _active_exports
+    with _export_lock:
+        _active_exports += 1
     try:
         return export_srt(request.video_path)
     except FileNotFoundError as exc:
@@ -89,3 +100,6 @@ def export_srt_route(request: ExportSrtRequest) -> ExportSrtResponse:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"保存字幕失败：{exc}") from exc
+    finally:
+        with _export_lock:
+            _active_exports -= 1

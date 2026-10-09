@@ -10,7 +10,10 @@ export interface ElectronAPI {
   resolveDouyinPublicPlayer: (videoId: string) => Promise<Record<string, unknown>>
   getBackendPort: () => Promise<number>
   getBackendToken: () => Promise<string>
+  isPackaged: () => Promise<boolean>
   checkForUpdates: () => Promise<UpdateCheckResult>
+  checkForStartupUpdate: () => Promise<UpdateCheckResult>
+  getActiveTaskCount: () => Promise<number>
   downloadAndInstallUpdate: () => Promise<'canceled' | 'installer-launched' | 'dmg-opened'>
   onUpdateDownloadProgress: (listener: (progress: UpdateDownloadProgress) => void) => () => void
 }
@@ -22,8 +25,8 @@ export interface UpdateDownloadProgress {
 }
 
 export type UpdateCheckResult =
-  | { status: 'available'; currentVersion: string; update: {
-      version: string; notes: string; releasePage: string; size: number
+  | { status: 'available' | 'required'; currentVersion: string; usingCachedPolicy?: boolean; update: {
+      version: string; minimumSupportedVersion?: string; notes: string; releasePage: string; size: number
     } }
   | { status: 'current' | 'unpublished' | 'unsupported'; currentVersion: string; message: string }
 
@@ -37,7 +40,10 @@ const api: ElectronAPI = {
   resolveDouyinPublicPlayer: (videoId) => ipcRenderer.invoke('douyin:resolvePublicPlayer', videoId),
   getBackendPort: () => ipcRenderer.invoke('app:getBackendPort'),
   getBackendToken: () => ipcRenderer.invoke('app:getBackendToken'),
+  isPackaged: () => ipcRenderer.invoke('app:isPackaged'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
+  checkForStartupUpdate: () => ipcRenderer.invoke('app:checkForStartupUpdate'),
+  getActiveTaskCount: () => ipcRenderer.invoke('app:getActiveTaskCount'),
   downloadAndInstallUpdate: () => ipcRenderer.invoke('app:downloadAndInstallUpdate'),
   onUpdateDownloadProgress: listener => {
     const handler = (_event: Electron.IpcRendererEvent, progress: UpdateDownloadProgress) => listener(progress)

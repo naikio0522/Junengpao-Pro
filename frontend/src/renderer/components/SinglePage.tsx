@@ -920,7 +920,7 @@ export default function SinglePage() {
         {/* Header */}
         <div className="vm-topbar flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 rounded-[18px] px-4 py-2.5 mb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.8</span></h1>
+            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.9</span></h1>
             <FeatureHelp tutorial />
             <ContactMe />
             <SponsorMe />
@@ -1026,7 +1026,7 @@ export default function SinglePage() {
                 成品 Hook
               </button>
             )}>
-              <div className="grid grid-cols-1 gap-2">
+              <div className="grid grid-cols-1 gap-2 max-sm:[&_.group>div]:flex-wrap max-sm:[&_.group>div>input]:min-w-[120px]">
                 <AssetCard kind="hook" label="Hook 首段" value={config.hook_dir} count={splitPathList(config.hook_dir).length > 1 ? splitPathList(config.hook_dir).length : scannedFiles.hook?.count} required pickAction="文件夹" secondaryAction="视频（可多选）" onSecondaryAction={browseHookVideo}
                   onChange={(v) => setConfig({ hook_dir: v })}
                   onOpen={() => {
@@ -1181,8 +1181,8 @@ export default function SinglePage() {
             </Group>
 
             {/* Parameters · overlap · volume · original action rail */}
-            <div className="vm-card grid grid-cols-[minmax(0,1fr)_112px] gap-3 rounded-[16px] p-3">
-              <div className="grid grid-cols-2 gap-x-4 gap-y-2 min-w-0">
+            <div className="vm-card grid grid-cols-[minmax(0,1fr)_120px] gap-3 rounded-[16px] p-3">
+              <div className="grid min-w-0 grid-cols-1 gap-x-4 gap-y-2 min-[560px]:grid-cols-2">
                 <Group title={config.selection_mode === 'speech_logic' ? '口播编排' : <span>参数<FeatureHelp topic="duration" title="时长模式" /></span>}>
                   <div className="space-y-1">
                     {config.selection_mode === 'speech_logic' ? <>
@@ -1254,7 +1254,7 @@ export default function SinglePage() {
               <div className="flex flex-col items-stretch justify-center gap-1.5 border-l border-border/[0.14] pl-3">
                 <span className="text-center text-[10px] text-muted-foreground">操作<FeatureHelp topic="actions" title="操作按钮" /></span>
                 <div className="space-y-1.5">
-                  <button type="button" aria-label="预检产能" title={preflightProgress?.message} onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary relative h-9 w-full overflow-hidden px-2 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
+                  <button type="button" aria-label="预检产能" title={preflightProgress?.message} onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary relative inline-flex h-9 w-full items-center justify-center gap-1 overflow-hidden whitespace-nowrap px-1 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
                     {preflightProgress && <span role="progressbar" aria-label="预检产能进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress.percent} aria-valuetext={preflightProgress.message} className="pointer-events-none absolute inset-0">
                       <span className="absolute inset-y-0 left-0 bg-accent/20 transition-[width] duration-300" style={{ width: `${preflightProgress.percent}%` }} />
                       <span className="absolute inset-x-0 bottom-0 h-[3px] bg-foreground/[0.08]">
@@ -1262,7 +1262,7 @@ export default function SinglePage() {
                       </span>
                     </span>}
                     <span className="relative z-10">{preflightRunning ? '预检中' : preflightProgress?.message === '预检失败' ? '预检失败' : '预检产能'}</span>
-                    {preflightProgress && <span className="relative z-10 ml-1 font-mono tabular-nums">{preflightProgress.percent}%</span>}
+                    {preflightProgress && <span className="relative z-10 font-mono tabular-nums">{preflightProgress.percent}%</span>}
                   </button>
                 </div>
                 <button type="button" aria-label="启动渲染" onClick={startRender} disabled={isRunning} className="vm-action-primary relative h-10 overflow-hidden bg-accent px-2 text-[12px] font-bold text-background hover:bg-accent-hover disabled:opacity-50">
