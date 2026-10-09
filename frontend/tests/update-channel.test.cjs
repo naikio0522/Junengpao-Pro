@@ -42,6 +42,7 @@ const publisher = require('../scripts/generate-update-channel.cjs')
 const { verifyExistingChannel } = require('../scripts/verify-existing-channel.cjs')
 const sha256 = 'a'.repeat(64)
 const releaseBase = 'https://github.com/naikio0522/Junengpao-Pro/releases/download'
+const runtimePlatform = process.platform === 'darwin' ? 'darwin' : 'win32'
 
 function manifest(version = '0.1.2', platform = 'win32') {
   const name = platform === 'win32'
@@ -110,14 +111,14 @@ test('main-process task query fails closed on active work, HTTP errors, and inva
 })
 
 test('minimum supported version is opt-in and applies only below the published floor', async () => {
-  const metadata = { ...manifest('0.1.9'), minimumSupportedVersion: '0.1.4' }
+  const metadata = { ...manifest('0.1.9', runtimePlatform), minimumSupportedVersion: '0.1.4' }
   const request = async () => new Response(JSON.stringify(metadata), {
     headers: { 'Content-Type': 'application/json' },
   })
   assert.equal((await loadUpdaterWithVersion('0.1.3', request).checkForUpdate()).status, 'required')
   assert.equal((await loadUpdaterWithVersion('0.1.4', request).checkForUpdate()).status, 'available')
   assert.equal((await loadUpdaterWithVersion('0.1.9', request).checkForUpdate()).status, 'current')
-  const optional = async () => new Response(JSON.stringify(manifest('0.1.9')))
+  const optional = async () => new Response(JSON.stringify(manifest('0.1.9', runtimePlatform)))
   assert.equal((await loadUpdaterWithVersion('0.1.3', optional).checkForUpdate()).status, 'available')
   for (const response of [new Response('down', { status: 503 }),
     new Response(JSON.stringify({ ...metadata, minimumSupportedVersion: '0.2.0' }))]) {
@@ -128,7 +129,7 @@ test('minimum supported version is opt-in and applies only below the published f
 
 test('startup remembers only a validated required policy and clears it after online rollback', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'vm-policy-cache-test-'))
-  const required = { ...manifest('0.1.9'), minimumSupportedVersion: '0.1.9' }
+  const required = { ...manifest('0.1.9', runtimePlatform), minimumSupportedVersion: '0.1.9' }
   const app = { getPath: () => directory }
   const online = loadUpdaterWithVersion('0.1.8',
     async () => new Response(JSON.stringify(required)), { app })
@@ -150,7 +151,7 @@ test('startup remembers only a validated required policy and clears it after onl
       async () => { throw new Error('offline') }, { app })
     await assert.rejects(() => anotherInstalledVersion.checkForStartupUpdate(), /无法连接/)
     const rollback = loadUpdaterWithVersion('0.1.8',
-      async () => new Response(JSON.stringify(manifest('0.1.9'))), { app })
+      async () => new Response(JSON.stringify(manifest('0.1.9', runtimePlatform))), { app })
     assert.equal((await rollback.checkForStartupUpdate()).status, 'available')
     assert.equal(fs.existsSync(cachePath), false)
     await assert.rejects(() => offline.checkForStartupUpdate(), /无法连接/)
