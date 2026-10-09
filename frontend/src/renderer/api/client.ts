@@ -309,7 +309,7 @@ export interface AccountSession {
 }
 
 export interface AccountMode {
-  mode: 'local_test' | 'cloud'
+  mode: 'local_test' | 'cloud' | 'cloud_unconfigured'
 }
 
 export interface MembershipPlan {
@@ -574,10 +574,41 @@ export const api = {
       method: 'POST', body: JSON.stringify({ video_path: videoPath }),
     }),
 
-  resolveLinkVideo: (url: string) =>
-    request<LinkVideoResolution>('/link-watermark/resolve', {
+  resolveLinkVideo: async (url: string) => {
+    const resolveNormally = () => request<LinkVideoResolution>('/link-watermark/resolve', {
       method: 'POST', body: JSON.stringify({ url, authorized: true }),
-    }),
+    })
+    if (!/https:\/\/[^\s/]*douyin\.com\//i.test(url) ||
+        !window.electronAPI?.resolveDouyinPublicPlayer) {
+      return resolveNormally()
+    }
+    const canonical = await request<{
+      page_url: string; platform_key: string; source_id: string
+    }>('/link-watermark/canonicalize', {
+      method: 'POST', body: JSON.stringify({ url, authorized: true }),
+    })
+    if (canonical.platform_key !== 'douyin') return resolveNormally()
+    let playerError = '官方播放器暂不可用'
+    try {
+      // Electron opens the official public player in an isolated guest session.
+      const douyin_detail = await window.electronAPI.resolveDouyinPublicPlayer(canonical.source_id)
+      return await request<LinkVideoResolution>('/link-watermark/resolve', {
+        method: 'POST', body: JSON.stringify({
+          url: canonical.page_url, authorized: true, douyin_detail,
+        }),
+      })
+    } catch (error) {
+      if (error instanceof ApiError) playerError = error.message
+    }
+    try {
+      return await resolveNormally()
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw new ApiError(`${playerError}；备用解析：${error.message}`, error.status)
+      }
+      throw error
+    }
+  },
 
   startLinkDownload: (input: { resolve_id: string; format_id?: string; output_dir: string; save_cover?: boolean }) =>
     request<{ task_id: string }>('/link-watermark/jobs', {

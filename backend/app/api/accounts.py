@@ -1,9 +1,10 @@
-"""Phone/password account endpoints for the local test database."""
+"""Phone/password account endpoints backed by cloud or an explicit local test store."""
 
 from __future__ import annotations
 
 import re
 import os
+import sys
 from functools import lru_cache
 from typing import Literal
 
@@ -61,14 +62,51 @@ class UserResponse(BaseModel):
 
 
 class AccountModeResponse(BaseModel):
-    mode: Literal["local_test", "cloud"]
+    mode: Literal["local_test", "cloud", "cloud_unconfigured"]
+
+
+class UnconfiguredAccountService:
+    """Fail closed when a desktop release has no approved cloud endpoint."""
+
+    @staticmethod
+    def _unavailable():
+        raise AccountServiceUnavailable('云端账号服务尚未配置，请更新安装包后重试')
+
+    def register(self, phone: str, password: str):
+        self._unavailable()
+
+    def login(self, phone: str, password: str):
+        self._unavailable()
+
+    def me(self, token: str):
+        self._unavailable()
+
+    def logout(self, token: str):
+        self._unavailable()
+
+    def is_member(self, token: str) -> bool:
+        return False
+
+
+AccountProvider = AccountService | RemoteAccountService | UnconfiguredAccountService
 
 
 @lru_cache(maxsize=1)
-def get_account_service() -> AccountService | RemoteAccountService:
+def get_account_service() -> AccountProvider:
+    # A bundled backend is release code even when launched directly, without
+    # Electron. Its account store cannot be switched to local via environment.
+    mode = ('cloud' if getattr(sys, 'frozen', False)
+            else os.environ.get('JNP_ACCOUNT_MODE', '').strip().lower())
     cloud_url = os.environ.get('JNP_ACCOUNT_API_URL', '').strip()
+    if mode == 'local_test':
+        return AccountService(SQLiteAccountRepository())
     if cloud_url:
-        return RemoteAccountService(cloud_url)
+        try:
+            return RemoteAccountService(cloud_url)
+        except ValueError:
+            return UnconfiguredAccountService()
+    if mode:
+        return UnconfiguredAccountService()
     return AccountService(SQLiteAccountRepository())
 
 
@@ -79,12 +117,15 @@ def get_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)
 
 
 @router.get("/mode", response_model=AccountModeResponse)
-def account_mode(accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
-    return {"mode": "cloud" if isinstance(accounts, RemoteAccountService) else "local_test"}
+def account_mode(accounts: AccountProvider = Depends(get_account_service)):
+    mode = ('cloud' if isinstance(accounts, RemoteAccountService)
+            else 'cloud_unconfigured' if isinstance(accounts, UnconfiguredAccountService)
+            else 'local_test')
+    return {"mode": mode}
 
 
 @router.post("/register", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: AccountCredentials, accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
+def register(payload: AccountCredentials, accounts: AccountProvider = Depends(get_account_service)):
     password = payload.password.get_secret_value()
     if not 8 <= len(password) <= 128 or not password.strip():
         raise HTTPException(status_code=400, detail="密码长度需为 8–128 位")
@@ -97,7 +138,7 @@ def register(payload: AccountCredentials, accounts: AccountService | RemoteAccou
 
 
 @router.post("/login", response_model=SessionResponse)
-def login(payload: AccountCredentials, accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
+def login(payload: AccountCredentials, accounts: AccountProvider = Depends(get_account_service)):
     try:
         return accounts.login(payload.phone, payload.password.get_secret_value())
     except InvalidCredentials:
@@ -107,7 +148,7 @@ def login(payload: AccountCredentials, accounts: AccountService | RemoteAccountS
 
 
 @router.get("/me", response_model=UserResponse)
-def me(token: str = Depends(get_token), accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
+def me(token: str = Depends(get_token), accounts: AccountProvider = Depends(get_account_service)):
     try:
         return accounts.me(token)
     except InvalidSession:
@@ -117,11 +158,13 @@ def me(token: str = Depends(get_token), accounts: AccountService | RemoteAccount
 
 
 @router.post("/logout")
-def logout(token: str = Depends(get_token), accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
+def logout(token: str = Depends(get_token), accounts: AccountProvider = Depends(get_account_service)):
     try:
         accounts.me(token)
     except InvalidSession:
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录") from None
+    except AccountServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         accounts.logout(token)
     except AccountServiceUnavailable as exc:

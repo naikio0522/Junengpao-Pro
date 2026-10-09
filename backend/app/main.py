@@ -25,7 +25,7 @@ if getattr(sys, 'frozen', False):
 app = FastAPI(
     title="巨能跑pro版 API",
     description="巨能跑pro版短视频矩阵自动化混剪后端 API",
-    version="0.1.7"
+    version="0.1.8"
 )
 
 app.add_middleware(

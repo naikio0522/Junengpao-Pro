@@ -6,7 +6,11 @@ import fs from 'fs'
 import { randomBytes, randomUUID } from 'crypto'
 import { pathToFileURL } from 'url'
 import { validateIdentity } from './backendHandshake'
+import { resolveAccountBackendConfig } from './accountBackendConfig'
 import { checkForUpdate, downloadAndInstallUpdate } from './releaseUpdater'
+import { resolvePublicDouyinPlayer } from './douyinPublicPlayer'
+
+declare const __JNP_DESKTOP_ACCOUNT_API_URL__: string
 
 let mainWindow: BrowserWindow | null = null
 let backendProcess: ChildProcess | null = null
@@ -68,7 +72,10 @@ function readPrepareUpdate(argv: string[]): PrepareRequest | null {
   }
 }
 
-const isDev = process.env.NODE_ENV === 'development'
+const isDev = !app.isPackaged && process.env.NODE_ENV === 'development'
+const accountBackendConfig = resolveAccountBackendConfig(
+  app.isPackaged, process.env, __JNP_DESKTOP_ACCOUNT_API_URL__,
+)
 let backendPort = 0
 const backendInstance = randomUUID()
 // Never put this secret in desktop-runtime.json: the file is intentionally
@@ -123,6 +130,10 @@ async function startBackend(): Promise<void> {
       stdio: 'pipe', windowsHide: true, detached: process.platform !== 'win32',
       env: {
         ...process.env,
+        // Release builds always require the cloud service. A missing endpoint
+        // is reported as unavailable; it must not create local test accounts.
+        JNP_ACCOUNT_MODE: accountBackendConfig.mode,
+        JNP_ACCOUNT_API_URL: accountBackendConfig.apiUrl,
         APPDATA: editionDataDir,
         LOCALAPPDATA: editionDataDir,
         ...(os.platform() === 'win32' ? {
@@ -429,6 +440,14 @@ ipcMain.handle('shell:openExternalHttps', async (_, rawUrl: string) => {
     throw new Error('只允许打开 HTTPS 链接')
   }
   await shell.openExternal(url.toString())
+})
+
+ipcMain.handle('douyin:resolvePublicPlayer', async (event, videoId: string) => {
+  if (event.sender !== mainWindow?.webContents ||
+      !event.senderFrame || !isTrustedRendererUrl(event.senderFrame.url)) {
+    throw new Error('未授权的应用窗口')
+  }
+  return resolvePublicDouyinPlayer(videoId)
 })
 
 ipcMain.handle('app:getBackendPort', () => backendPort)

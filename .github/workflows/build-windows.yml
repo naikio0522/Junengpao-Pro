@@ -123,6 +123,8 @@ jobs:
 
       - name: Build renderer / main / preload
         working-directory: frontend
+        env:
+          JNP_DESKTOP_ACCOUNT_API_URL: ${{ vars.JNP_DESKTOP_ACCOUNT_API_URL }}
         run: |
           node --test tests/runtime.test.cjs tests/update-channel.test.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

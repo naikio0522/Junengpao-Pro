@@ -122,6 +122,21 @@ test('startup rejects old versions, unrelated instances and invalid ports', () =
   ]) assert.throws(() => validateIdentity(response, '2.3.2', 'owned'))
 })
 
+test('packaged account mode stays cloud even with inherited dev and local-test environment', () => {
+  const { resolveAccountBackendConfig } = load('src/main/accountBackendConfig.ts')
+  const packaged = resolveAccountBackendConfig(true, {
+    NODE_ENV: 'development', JNP_ACCOUNT_MODE: 'local_test',
+    JNP_ACCOUNT_API_URL: 'https://runtime.example.com',
+  }, 'https://release.example.com')
+  assert.deepEqual(packaged, { mode: 'cloud', apiUrl: 'https://release.example.com' })
+  assert.deepEqual(resolveAccountBackendConfig(true, { JNP_ACCOUNT_MODE: 'local_test' }, ''),
+    { mode: 'cloud', apiUrl: '' })
+  assert.deepEqual(resolveAccountBackendConfig(false, {}, ''),
+    { mode: 'local_test', apiUrl: '' })
+  assert.deepEqual(resolveAccountBackendConfig(false, { JNP_ACCOUNT_API_URL: 'https://test.example.com' }, ''),
+    { mode: 'cloud', apiUrl: 'https://test.example.com' })
+})
+
 test('real store shows backend logs once, retains cursor after clear and captures final logs', () => {
   global.localStorage = { getItem: () => null, setItem: () => {} }
   const { useStore } = load('src/renderer/store.ts')

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import math
 import re
 import socket
 import time
@@ -268,20 +269,104 @@ def _extract_info(url: str, platform: str) -> dict:
         with _RestrictedYoutubeDL(platform, settings) as downloader:
             info = downloader.extract_info(url, download=False)
     except DownloadError as exc:
-        if 'fresh cookies' in str(exc).lower():
+        if platform == 'douyin' and 'fresh cookies' in str(exc).lower():
             raise LinkResolutionError(
-                '抖音当前公开接口要求新的访客 Cookie；本软件不会读取浏览器凭据。'
-                '可改用本地视频去水印功能。') from exc
+                '抖音网页详情接口暂不可用；桌面端可尝试从官方播放器解析公开'
+                '视频流，也可使用本地视频去水印功能。') from exc
         raise LinkResolutionError('平台解析失败：视频可能需要登录、已下架，或平台接口发生变化') from exc
     if not isinstance(info, dict) or info.get('_type') in ('playlist', 'url'):
         raise LinkResolutionError('只支持公开的单条视频')
     return info
 
 
-def resolve_public_video(text: str) -> dict:
+def canonical_public_video(text: str) -> tuple[str, str]:
     page_url, platform = parse_public_link(text)
-    page_url = canonical_page_url(page_url, platform)
-    info = _extract_info(page_url, platform)
+    return canonical_page_url(page_url, platform), platform
+
+
+def _info_from_douyin_player(page_url: str, detail: dict) -> dict:
+    """Convert only the matching official player's direct playback addresses."""
+    video_id = urllib.parse.urlsplit(page_url).path.rstrip('/').rsplit('/', 1)[-1]
+    if not isinstance(detail, dict) or str(detail.get('aweme_id')) != video_id:
+        raise LinkResolutionError('播放器返回的视频与分享链接不一致')
+    video = detail.get('video')
+    if not isinstance(video, dict):
+        raise LinkResolutionError('官方播放器未提供公开视频流')
+
+    formats = []
+    seen_urls = set()
+
+    def positive_number(value: object) -> int | float | None:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        if isinstance(value, float) and not math.isfinite(value):
+            return None
+        return min(value, 10**15) if value > 0 else None
+
+    def append_addr(addr: object, format_id: str) -> None:
+        if not isinstance(addr, dict):
+            return
+        urls = addr.get('url_list')
+        if not isinstance(urls, list):
+            return
+        for media_url in urls[:8]:
+            if not isinstance(media_url, str) or len(media_url) > 4096:
+                continue
+            try:
+                _public_https_url(media_url, suffixes=_MEDIA_SUFFIXES['douyin'],
+                                  resolve_dns=False)
+            except LinkResolutionError:
+                continue
+            if '/playwm' in urllib.parse.urlsplit(media_url).path.lower():
+                continue
+            if media_url in seen_urls:
+                continue
+            seen_urls.add(media_url)
+            width = positive_number(addr.get('width'))
+            height = positive_number(addr.get('height'))
+            formats.append({
+                'format_id': format_id, 'format_note': 'Direct playback',
+                'url': media_url, 'ext': 'mp4', 'acodec': 'aac',
+                'width': width if width and width <= 10000 else None,
+                'height': height if height and height <= 10000 else None,
+                'filesize': positive_number(addr.get('data_size')),
+            })
+
+    # download_addr is intentionally excluded: the platform marks it as a
+    # watermarked download when has_watermark is true. These URLs come from
+    # play_addr, exactly as used by the public player; no URL rewriting.
+    for key in ('play_addr', 'play_addr_h264', 'play_addr_265',
+                'play_addr_bytevc1'):
+        append_addr(video.get(key), key)
+    bitrates = video.get('bit_rate')
+    for bitrate in (bitrates[:24] if isinstance(bitrates, list) else []):
+        if isinstance(bitrate, dict):
+            append_addr(bitrate.get('play_addr'),
+                        str(bitrate.get('gear_name') or 'playback'))
+
+    cover = video.get('cover')
+    thumbnails = cover.get('url_list') if isinstance(cover, dict) else None
+    duration_ms = (positive_number(detail.get('duration')) or
+                   positive_number(video.get('duration')))
+    return {
+        'id': video_id, 'title': detail.get('desc') or '未命名视频',
+        'duration': duration_ms / 1000 if duration_ms is not None else None,
+        'thumbnail': thumbnails[0] if (isinstance(thumbnails, list) and thumbnails
+                                      and isinstance(thumbnails[0], str)) else None,
+        'http_headers': {
+            'Referer': f'https://open.douyin.com/player/video?vid={video_id}',
+            'User-Agent': 'Mozilla/5.0',
+        },
+        'formats': formats,
+    }
+
+
+def resolve_public_video(text: str, *, douyin_detail: dict | None = None) -> dict:
+    page_url, platform = canonical_public_video(text)
+    if douyin_detail is not None and platform != 'douyin':
+        raise LinkResolutionError('播放器信息与分享平台不一致')
+    info = (_info_from_douyin_player(page_url, douyin_detail)
+            if douyin_detail is not None else _extract_info(page_url, platform))
     formats = []
     for candidate in info.get('formats') or [info]:
         media_url = candidate.get('url')

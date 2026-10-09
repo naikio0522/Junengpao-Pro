@@ -105,7 +105,17 @@ app.whenReady().then(async () => {
     await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("登录已失效")')
     await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] [role=tab]")].find(node => node.textContent.trim() === "注册").click()')
     assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("注册云端账户")'), true)
-    console.log('PASS account UI: local/cloud disclosure, transient 503 retry, 401 cleanup, register, logout, login, no password persistence')
+
+    await evaluate('sessionStorage.setItem("__test_account_mode", "cloud_unconfigured")')
+    const unconfiguredReload = new Promise(resolve => win.webContents.once('did-finish-load', resolve))
+    win.webContents.reload()
+    await unconfiguredReload
+    await waitFor('Boolean(document.querySelector("button[aria-label=登录或注册]"))')
+    await evaluate('document.querySelector("button[aria-label=登录或注册]").click()')
+    await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("云端账户服务尚未接通")')
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户] button[type=submit]").disabled'), true)
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("不会在本机创建测试账户")'), true)
+    console.log('PASS account UI: local/cloud/unconfigured disclosure, safe disabled form, transient 503 retry, 401 cleanup, register, logout, login, no password persistence')
     app.exit(0)
   } catch (error) {
     console.error(error)

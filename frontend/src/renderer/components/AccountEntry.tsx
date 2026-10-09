@@ -18,7 +18,7 @@ export function AccountEntry() {
   const [selectedPlan, setSelectedPlan] = useState('')
   const [provider, setProvider] = useState<'alipay' | 'wechat'>('alipay')
   const [order, setOrder] = useState<MembershipOrder | null>(null)
-  const [accountMode, setAccountMode] = useState<'local_test' | 'cloud' | null>(null)
+  const [accountMode, setAccountMode] = useState<'local_test' | 'cloud' | 'cloud_unconfigured' | null>(null)
   const [restoreBusy, setRestoreBusy] = useState(false)
   const [restoreError, setRestoreError] = useState('')
 
@@ -113,6 +113,10 @@ export function AccountEntry() {
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     setError('')
+    if (accountMode === 'cloud_unconfigured' || accountMode === null) {
+      setError('云端账户服务尚未接通，请更新安装包后重试。')
+      return
+    }
     const normalizedPhone = phone.trim()
     if (!/^1[3-9]\d{9}$/.test(normalizedPhone)) {
       setError('请输入 11 位中国大陆手机号。')
@@ -211,6 +215,9 @@ export function AccountEntry() {
           <button type="button" onClick={() => setBillingOpen(true)} className="rounded border border-accent/45 px-3 py-1.5 text-accent">会员充值</button>
           <button type="button" disabled={busy} onClick={() => void logout()} className="rounded bg-accent px-3 py-1.5 text-background disabled:opacity-50">退出登录</button>
         </div> : <>
+          {accountMode === 'cloud_unconfigured' && <p role="status" className="mb-3 rounded border border-amber-500/25 bg-amber-500/[0.07] p-2 text-xs leading-5 text-muted-foreground">
+            云端账户服务尚未接通，当前版本暂不能注册或登录。请更新安装包后重试。
+          </p>}
           {restoreError && <div role="status" className="mb-3 rounded border border-amber-500/25 bg-amber-500/[0.07] p-2 text-xs leading-5 text-muted-foreground">
             {restoreError}
             {sessionStorage.getItem(ACCOUNT_TOKEN_KEY) && <button type="button" disabled={restoreBusy} onClick={() => void restoreSession()} className="ml-2 text-accent disabled:opacity-50">{restoreBusy ? '正在重试…' : '重试检查'}</button>}
@@ -236,7 +243,7 @@ export function AccountEntry() {
                 aria-label="确认账户密码" className="mt-1 block h-9 w-full rounded border border-border/20 bg-background px-2 text-foreground outline-none focus:border-accent" />
             </label>}
             {!!error && <p role="alert" className="text-xs text-hot">{error}</p>}
-            <button type="submit" disabled={busy} className="w-full rounded bg-accent px-3 py-2 text-xs font-semibold text-background disabled:opacity-50">
+            <button type="submit" disabled={busy || accountMode === null || accountMode === 'cloud_unconfigured'} className="w-full rounded bg-accent px-3 py-2 text-xs font-semibold text-background disabled:opacity-50">
               {busy ? '请稍候…' : mode === 'register' ? '注册并登录' : '登录'}
             </button>
           </form>
@@ -244,6 +251,8 @@ export function AccountEntry() {
             ? '仅在本机保存测试账户。手机号未经短信验证；注册成功不代表已创建云端账户。'
             : accountMode === 'cloud'
               ? '账号由云端服务保存。手机号尚未经短信验证，请勿将其视为已核验身份。'
+              : accountMode === 'cloud_unconfigured'
+                ? '此版本未配置云端账户地址，不会在本机创建测试账户。'
               : '正在确认账户服务模式；请确认后再注册。'}</p>
         </>}
       </section>

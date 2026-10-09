@@ -920,7 +920,7 @@ export default function SinglePage() {
         {/* Header */}
         <div className="vm-topbar flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 rounded-[18px] px-4 py-2.5 mb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.7</span></h1>
+            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.8</span></h1>
             <FeatureHelp tutorial />
             <ContactMe />
             <SponsorMe />

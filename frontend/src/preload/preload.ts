@@ -7,6 +7,7 @@ export interface ElectronAPI {
   saveTextFile: (defaultName: string, content: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
   openPath: (filePath: string) => Promise<void>
   openExternalHttps: (url: string) => Promise<void>
+  resolveDouyinPublicPlayer: (videoId: string) => Promise<Record<string, unknown>>
   getBackendPort: () => Promise<number>
   getBackendToken: () => Promise<string>
   checkForUpdates: () => Promise<UpdateCheckResult>
@@ -33,6 +34,7 @@ const api: ElectronAPI = {
   saveTextFile: (defaultName, content, filters) => ipcRenderer.invoke('dialog:saveText', defaultName, content, filters),
   openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
   openExternalHttps: (url) => ipcRenderer.invoke('shell:openExternalHttps', url),
+  resolveDouyinPublicPlayer: (videoId) => ipcRenderer.invoke('douyin:resolvePublicPlayer', videoId),
   getBackendPort: () => ipcRenderer.invoke('app:getBackendPort'),
   getBackendToken: () => ipcRenderer.invoke('app:getBackendToken'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),

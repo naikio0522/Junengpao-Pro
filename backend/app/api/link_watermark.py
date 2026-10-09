@@ -5,6 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,8 +15,8 @@ from pydantic import BaseModel, Field
 
 from ..core.brand_watermark import apply_brand_watermark
 from ..core.link_watermark import (
-    LinkResolutionError, download_cover_image, download_direct_video, remux_to_mp4,
-    resolve_public_video,
+    LinkResolutionError, canonical_public_video, download_cover_image,
+    download_direct_video, remux_to_mp4, resolve_public_video,
 )
 from ..services.account_service import AccountService, InvalidSession
 from ..services.remote_account_service import AccountServiceUnavailable, RemoteAccountService
@@ -31,6 +32,7 @@ MAX_RETAINED_JOBS = 40
 class ResolveRequest(BaseModel):
     url: str = Field(min_length=8, max_length=4000)
     authorized: bool = False
+    douyin_detail: dict | None = None
 
 
 class LinkDownloadRequest(BaseModel):
@@ -64,7 +66,9 @@ class LinkWatermarkService:
     def resolve(self, request: ResolveRequest) -> dict:
         if not request.authorized:
             raise LinkResolutionError('请确认您拥有视频版权或处理授权')
-        result = resolve_public_video(request.url)
+        if request.douyin_detail is not None and len(json.dumps(request.douyin_detail)) > 128 * 1024:
+            raise LinkResolutionError('播放器返回的数据过大')
+        result = resolve_public_video(request.url, douyin_detail=request.douyin_detail)
         resolve_id = uuid.uuid4().hex
         with self.lock:
             now = time.monotonic()
@@ -238,6 +242,20 @@ class LinkWatermarkService:
 
 
 link_watermark_service = LinkWatermarkService()
+
+
+@router.post('/canonicalize')
+def canonicalize_link(request: ResolveRequest):
+    if not request.authorized:
+        raise HTTPException(status_code=422, detail='请确认您拥有视频版权或处理授权')
+    try:
+        page_url, platform = canonical_public_video(request.url)
+        return {
+            'page_url': page_url, 'platform_key': platform,
+            'source_id': page_url.split('?', 1)[0].rstrip('/').rsplit('/', 1)[-1],
+        }
+    except LinkResolutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post('/resolve')

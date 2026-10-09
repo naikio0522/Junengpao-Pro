@@ -153,6 +153,80 @@ class LinkSafetyTests(unittest.TestCase):
         self.assertEqual(result['watermark_status'], 'unverified')
         self.assertIn('无法保证', result['warning'])
 
+    def test_official_player_uses_matching_public_playback_stream_only(self):
+        detail = {
+            'aweme_id': '1234567890123456789', 'desc': '公开视频', 'duration': 10567,
+            'video': {
+                'play_addr': {
+                    'url_list': [
+                        'https://v26-web.douyinvod.com/video/play.mp4',
+                        'https://www.douyin.com/aweme/v1/playwm/?video_id=bad',
+                    ],
+                    'width': 1080, 'height': 1920, 'data_size': 2048,
+                },
+                'download_addr': {
+                    'url_list': ['https://v26-web.douyinvod.com/video/playwm.mp4'],
+                },
+                'has_watermark': True,
+                'bit_rate': [{'gear_name': '720p', 'play_addr': {
+                    'url_list': ['https://v26-web.douyinvod.com/video/720p.mp4'],
+                    'height': 1280,
+                }}],
+            },
+        }
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns), patch(
+            'app.core.link_watermark._extract_info', side_effect=AssertionError('yt-dlp called'),
+        ):
+            result = resolve_public_video(
+                'https://www.douyin.com/video/1234567890123456789', douyin_detail=detail)
+        self.assertEqual(result['source_id'], detail['aweme_id'])
+        self.assertEqual(result['video_url'], 'https://v26-web.douyinvod.com/video/play.mp4')
+        self.assertEqual(len(result['formats']), 2)
+        self.assertNotIn('playwm', str(result['formats']))
+        self.assertEqual(result['watermark_status'], 'unverified')
+
+    def test_official_player_rejects_mismatched_id_and_non_platform_media(self):
+        detail = {'aweme_id': '9876543210', 'video': {'play_addr': {
+            'url_list': ['https://v26-web.douyinvod.com/video/play.mp4']}}}
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns):
+            with self.assertRaisesRegex(LinkResolutionError, '不一致'):
+                resolve_public_video('https://www.douyin.com/video/1234567890',
+                                     douyin_detail=detail)
+            detail['aweme_id'] = '1234567890'
+            detail['video']['play_addr']['url_list'] = [
+                'https://127.0.0.1/private.mp4',
+                'https://douyinvod.com.evil.test/video.mp4',
+            ]
+            with self.assertRaisesRegex(LinkResolutionError, '没有找到'):
+                resolve_public_video('https://www.douyin.com/video/1234567890',
+                                     douyin_detail=detail)
+
+    def test_official_player_duration_uses_milliseconds_and_limits_long_video(self):
+        detail = {'aweme_id': '1234567890', 'duration': 901000, 'video': {
+            'play_addr': {'url_list': ['https://v26-web.douyinvod.com/clip.mp4']}}}
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns):
+            with self.assertRaisesRegex(LinkResolutionError, '超过 15 分钟'):
+                resolve_public_video('https://www.douyin.com/video/1234567890',
+                                     douyin_detail=detail)
+            detail['duration'] = 'invalid'
+            detail['video']['duration'] = 901000
+            with self.assertRaisesRegex(LinkResolutionError, '超过 15 分钟'):
+                resolve_public_video('https://www.douyin.com/video/1234567890',
+                                     douyin_detail=detail)
+
+    def test_official_player_malformed_optional_fields_do_not_crash(self):
+        detail = {'aweme_id': '1234567890', 'duration': 'bad', 'video': {
+            'play_addr': {'url_list': ['https://v26-web.douyinvod.com/clip.mp4'],
+                          'height': 'huge', 'data_size': 'unknown'},
+            'bit_rate': {'unexpected': 'object'},
+            'cover': {'url_list': [{'not': 'a URL'}]},
+        }}
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns):
+            result = resolve_public_video('https://www.douyin.com/video/1234567890',
+                                          douyin_detail=detail)
+        self.assertEqual(result['thumbnail_url'], None)
+        self.assertEqual(result['formats'][0]['height'], None)
+
     def test_official_iesdouyin_short_redirect_is_normalized_without_opening_page(self):
         with patch('app.core.link_watermark._resolve_short_page', return_value=
                    'https://www.iesdouyin.com/share/video/7679408277695810856/'), patch(
@@ -189,6 +263,28 @@ class LinkSafetyTests(unittest.TestCase):
                    side_effect=DownloadError('Fresh cookies are needed')):
             with self.assertRaisesRegex(LinkResolutionError, '本地视频去水印'):
                 _extract_info('https://www.douyin.com/video/123456789', 'douyin')
+
+    def test_canonicalize_endpoint_validates_public_single_video(self):
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns):
+            with TestClient(app) as client:
+                response = client.post('/api/link-watermark/canonicalize', json={
+                    'url': 'https://www.douyin.com/video/1234567890', 'authorized': True,
+                })
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['source_id'], '1234567890')
+
+    def test_malformed_player_payload_returns_422(self):
+        with patch('app.core.link_watermark.socket.getaddrinfo', side_effect=_public_dns):
+            with TestClient(app) as client:
+                response = client.post('/api/link-watermark/resolve', json={
+                    'url': 'https://www.douyin.com/video/1234567890',
+                    'authorized': True,
+                    'douyin_detail': {'aweme_id': '1234567890', 'video': {
+                        'bit_rate': {'not': 'a list'},
+                        'cover': {'url_list': [{'not': 'a URL'}]},
+                    }},
+                })
+        self.assertEqual(response.status_code, 422)
 
     def test_download_stream_has_hard_size_limit(self):
         class Response(io.BytesIO):
