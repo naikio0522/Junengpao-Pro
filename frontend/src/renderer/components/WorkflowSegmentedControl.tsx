@@ -1,11 +1,13 @@
 import { useCallback, useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react'
 
-export type WorkflowMode = 'speech_logic' | 'random' | 'dedup'
+export type WorkflowMode = 'speech_logic' | 'random' | 'dedup' | 'link_watermark' | 'subtitle'
 
 const modes: { value: WorkflowMode; label: string }[] = [
   { value: 'speech_logic', label: '口播逻辑（测试版v0.1）' },
   { value: 'random', label: '随机混剪' },
   { value: 'dedup', label: '独立去重变换' },
+  { value: 'link_watermark', label: '短视频链接一键去水印' },
+  { value: 'subtitle', label: '成片转字幕' },
 ]
 
 interface Props {

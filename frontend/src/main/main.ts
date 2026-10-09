@@ -3,7 +3,8 @@ import { spawn, ChildProcess } from 'child_process'
 import path from 'path'
 import os from 'os'
 import fs from 'fs'
-import { randomUUID } from 'crypto'
+import { randomBytes, randomUUID } from 'crypto'
+import { pathToFileURL } from 'url'
 import { validateIdentity } from './backendHandshake'
 import { checkForUpdate, downloadAndInstallUpdate } from './releaseUpdater'
 
@@ -70,6 +71,9 @@ function readPrepareUpdate(argv: string[]): PrepareRequest | null {
 const isDev = process.env.NODE_ENV === 'development'
 let backendPort = 0
 const backendInstance = randomUUID()
+// Never put this secret in desktop-runtime.json: the file is intentionally
+// discoverable for local diagnostics, while API access must remain private.
+const backendApiToken = randomBytes(32).toString('hex')
 let backendVerified = false
 const editionDataDir = path.join(process.env.APPDATA || os.homedir(), 'VideoMatrix SpeechLogic')
 const runtimeFile = path.join(editionDataDir, 'desktop-runtime.json')
@@ -126,6 +130,7 @@ async function startBackend(): Promise<void> {
             path.join(process.env.LOCALAPPDATA || editionDataDir, '巨能跑pro版', 'accounts.sqlite3'),
         } : {}),
         VIDEOMATRIX_INSTANCE: backendInstance,
+        VIDEOMATRIX_API_TOKEN: backendApiToken,
         PYTHONIOENCODING: 'utf-8',
       },
     })
@@ -170,7 +175,10 @@ async function startBackend(): Promise<void> {
             while (!settled && !isQuitting) {
               let health: any
               try {
-                const response = await fetch(`http://127.0.0.1:${backendPort}/api/health`, { signal: AbortSignal.timeout(1500) })
+                const response = await fetch(`http://127.0.0.1:${backendPort}/api/health`, {
+                  signal: AbortSignal.timeout(1500),
+                  headers: { 'X-VideoMatrix-Token': backendApiToken },
+                })
                 if (response.ok) health = await response.json()
               } catch { /* Socket was bound before uvicorn finished startup. */ }
               if (health) {
@@ -230,11 +238,15 @@ async function stopBackendTasks(timeoutMs = 2500) {
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
   try {
-    const health = await fetch(`http://127.0.0.1:${backendPort}/api/health`, { signal: controller.signal }).then(r => r.json())
+    const health = await fetch(`http://127.0.0.1:${backendPort}/api/health`, {
+      signal: controller.signal,
+      headers: { 'X-VideoMatrix-Token': backendApiToken },
+    }).then(r => r.json())
     validateIdentity({ ...health, port: backendPort }, app.getVersion(), backendInstance)
     await fetch(`http://127.0.0.1:${backendPort}/api/tasks/stop-all`, {
       method: 'POST',
       signal: controller.signal,
+      headers: { 'X-VideoMatrix-Token': backendApiToken },
     })
   } catch {
     // Backend may already be down; closing should still proceed.
@@ -254,6 +266,9 @@ async function shutdownApp() {
 
 function createWindow() {
   Menu.setApplicationMenu(null)
+
+  const rendererFile = path.join(__dirname, '../renderer/index.html')
+  const rendererUrl = pathToFileURL(rendererFile).href
 
   mainWindow = new BrowserWindow({
     width: 1440,
@@ -281,8 +296,14 @@ function createWindow() {
     mainWindow.loadURL('http://localhost:5173')
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(rendererFile)
   }
+
+  // A navigated web page must never inherit the app's privileged preload IPC.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (!isTrustedRendererUrl(url, rendererUrl)) event.preventDefault()
+  })
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
 
   mainWindow.once('ready-to-show', () => {
     mainWindow?.show()
@@ -315,6 +336,16 @@ function createWindow() {
   mainWindow.on('closed', () => {
     mainWindow = null
   })
+}
+
+function isTrustedRendererUrl(rawUrl: string, fileUrl = pathToFileURL(path.join(__dirname, '../renderer/index.html')).href): boolean {
+  try {
+    const candidate = new URL(rawUrl)
+    if (isDev) return candidate.origin === 'http://localhost:5173'
+    return `${candidate.protocol}//${candidate.host}${candidate.pathname}` === fileUrl
+  } catch {
+    return false
+  }
 }
 
 function resolveDialogDefaultPath(rawPath?: string): string | undefined {
@@ -392,15 +423,22 @@ ipcMain.handle('shell:openPath', async (_, filePath: string) => {
 })
 
 ipcMain.handle('shell:openExternalHttps', async (_, rawUrl: string) => {
-  if (typeof rawUrl !== 'string' || rawUrl.length > 4096) throw new Error('付款地址无效')
+  if (typeof rawUrl !== 'string' || rawUrl.length > 4096) throw new Error('链接地址无效')
   const url = new URL(rawUrl)
   if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
-    throw new Error('只允许打开 HTTPS 付款页面')
+    throw new Error('只允许打开 HTTPS 链接')
   }
   await shell.openExternal(url.toString())
 })
 
 ipcMain.handle('app:getBackendPort', () => backendPort)
+ipcMain.handle('app:getBackendToken', (event) => {
+  if (event.sender !== mainWindow?.webContents ||
+      !event.senderFrame || !isTrustedRendererUrl(event.senderFrame.url)) {
+    throw new Error('未授权的应用窗口')
+  }
+  return backendApiToken
+})
 ipcMain.handle('app:checkForUpdates', () => checkForUpdate())
 ipcMain.handle('app:downloadAndInstallUpdate', async () => {
   if (!mainWindow) throw new Error('窗口尚未就绪，请稍后重试。')

@@ -12,11 +12,12 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, ConfigDict, SecretStr
 
 from .accounts import (
-    AccountAlreadyExists, AccountService, InvalidCredentials, InvalidSession,
+    AccountAlreadyExists, AccountService, InvalidCredentials, InvalidSession, normalize_phone,
 )
 from .config import ConfigurationError, Settings
 from .mysql_repository import MySqlRepository
 from .payments import InvalidPayment, PaymentGateway, PaymentService, PaymentUnavailable
+from .rate_limit import RateLimitExceeded, RateLimiter
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -36,7 +37,8 @@ class NewOrder(BaseModel):
 
 def create_app(*, settings: Settings | None = None, repository=None,
                gateways: Mapping[str, PaymentGateway] | None = None) -> FastAPI:
-    app = FastAPI(title="巨能跑 Pro 云端账号服务", version="0.1.0")
+    app = FastAPI(title="巨能跑 Pro 云端账号服务", version="0.1.0",
+                  docs_url=None, redoc_url=None, openapi_url=None)
     installed_gateways = dict(gateways or {})
 
     def runtime():
@@ -59,6 +61,21 @@ def create_app(*, settings: Settings | None = None, repository=None,
         except InvalidSession:
             raise HTTPException(status_code=401, detail="登录已失效，请重新登录") from None
 
+    def limit_account_request(request: Request, operation: str, phone: str) -> None:
+        config, store, _, _ = runtime()
+        if not config.public_accounts:
+            raise HTTPException(status_code=503, detail="公开账号接口尚未启用")
+        try:
+            normalized_phone = normalize_phone(phone)
+        except ValueError:
+            normalized_phone = None
+        source_ip = request.client.host if request.client else "unknown"
+        try:
+            RateLimiter(store, config.rate_limit_hmac_key).consume(
+                operation, source_ip, normalized_phone)
+        except RateLimitExceeded:
+            raise HTTPException(status_code=429, detail="请求过于频繁，请稍后再试") from None
+
     @app.exception_handler(pymysql.MySQLError)
     async def database_error(_request: Request, _exc: pymysql.MySQLError):
         # Do not reveal database endpoints, SQL or user records to clients.
@@ -79,7 +96,8 @@ def create_app(*, settings: Settings | None = None, repository=None,
         return {"ok": True}
 
     @app.post("/api/account/register", status_code=status.HTTP_201_CREATED)
-    def register(payload: Credentials):
+    def register(payload: Credentials, request: Request):
+        limit_account_request(request, "register", payload.phone)
         _, _, accounts, _ = runtime()
         try:
             return accounts.register(payload.phone, payload.password.get_secret_value())
@@ -89,7 +107,8 @@ def create_app(*, settings: Settings | None = None, repository=None,
             raise HTTPException(status_code=409, detail="无法完成注册，请尝试登录或更换手机号") from None
 
     @app.post("/api/account/login")
-    def login(payload: Credentials):
+    def login(payload: Credentials, request: Request):
+        limit_account_request(request, "login", payload.phone)
         _, _, accounts, _ = runtime()
         try:
             return accounts.login(payload.phone, payload.password.get_secret_value())
@@ -115,6 +134,8 @@ def create_app(*, settings: Settings | None = None, repository=None,
     @app.get("/api/membership/plans")
     def plans():
         config, _, _, _ = runtime()
+        if config.account_only:
+            return []
         return [{"code": p.code, "title": p.title, "amount_fen": p.amount_fen,
                  "duration_days": p.duration_days} for p in config.plans]
 
@@ -137,7 +158,10 @@ def create_app(*, settings: Settings | None = None, repository=None,
         if not re.fullmatch(r"[0-9a-f]{32}", order_id):
             raise HTTPException(status_code=404, detail="订单不存在")
         _, _, _, payments = runtime()
-        result = payments.order_for_user(order_id, user["id"])
+        try:
+            result = payments.order_for_user(order_id, user["id"])
+        except PaymentUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         if result is None:
             raise HTTPException(status_code=404, detail="订单不存在")
         return result

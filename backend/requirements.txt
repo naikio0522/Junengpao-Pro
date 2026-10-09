@@ -5,3 +5,4 @@ python-multipart>=0.0.6
 aiofiles>=23.2.0
 faster-whisper==1.2.1
 av==18.1.0
+yt-dlp==2026.8.19

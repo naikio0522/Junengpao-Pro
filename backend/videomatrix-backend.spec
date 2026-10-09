@@ -54,7 +54,7 @@ for notice in (FONT_LICENSE, FONT_README):
 model_notice = BACKEND_DIR / 'assets' / 'licenses' / 'speech-model-origin.txt'
 if model_notice.exists():
     datas.append((str(model_notice), 'licenses/speech-model'))
-for package_name in ('faster-whisper', 'av', 'onnxruntime', 'huggingface-hub'):
+for package_name in ('faster-whisper', 'av', 'onnxruntime', 'huggingface-hub', 'yt-dlp'):
     try:
         package = distribution(package_name)
     except PackageNotFoundError:
@@ -103,6 +103,7 @@ hiddenimports = [
     'app.api.billing',
     'app.api.subtitles',
     'app.api.watermark_removal',
+    'app.api.link_watermark',
     'app.api.standalone_variants',
     'app.core.ffmpeg',
     'app.core.video_matrix',
@@ -116,6 +117,10 @@ hiddenimports = [
     'app.core.video_cover',
     'app.core.brand_watermark',
     'app.core.watermark_removal',
+    'app.core.link_watermark',
+    'yt_dlp.extractor.tiktok',
+    'yt_dlp.extractor.xiaohongshu',
+    'yt_dlp.networking._urllib',
     'app.services.task_service',
     'app.services.account_service',
     'app.services.remote_account_service',

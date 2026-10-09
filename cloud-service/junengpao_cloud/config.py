@@ -30,6 +30,11 @@ class Settings:
     db_user: str
     db_password: str = field(repr=False)
     db_ca_file: Path = Path()
+    # The existing Aliyun RDS currently contains only account_users and
+    # account_sessions. Account-only mode does not assume a payment migration.
+    account_only: bool = False
+    public_accounts: bool = False
+    rate_limit_hmac_key: str = field(default="", repr=False)
     notify_base_url: str = ""
     alipay_app_id: str = ""
     wechat_mchid: str = ""
@@ -50,6 +55,15 @@ class Settings:
             raise ConfigurationError("端口或会员套餐配置无效") from exc
         if not 1 <= port <= 65535 or not isinstance(raw_plans, list):
             raise ConfigurationError("端口或会员套餐配置无效")
+        raw_account_only = os.environ.get("JNP_ACCOUNT_ONLY_MODE", "0").strip()
+        if raw_account_only not in {"0", "1"}:
+            raise ConfigurationError("JNP_ACCOUNT_ONLY_MODE 只允许 0 或 1")
+        raw_public_accounts = os.environ.get("JNP_PUBLIC_ACCOUNTS", "0").strip()
+        if raw_public_accounts not in {"0", "1"}:
+            raise ConfigurationError("JNP_PUBLIC_ACCOUNTS 只允许 0 或 1")
+        rate_limit_key = os.environ.get("JNP_RATE_LIMIT_HMAC_KEY", "")
+        if raw_public_accounts == "1" and len(rate_limit_key.encode("utf-8")) < 32:
+            raise ConfigurationError("公开账号接口需要服务端限流密钥（至少 32 字节）")
         plans = []
         for item in raw_plans:
             if not isinstance(item, dict):
@@ -71,6 +85,9 @@ class Settings:
             db_host=os.environ["JNP_DB_HOST"], db_port=port,
             db_name=os.environ["JNP_DB_NAME"], db_user=os.environ["JNP_DB_USER"],
             db_password=os.environ["JNP_DB_PASSWORD"], db_ca_file=ca_file,
+            account_only=raw_account_only == "1",
+            public_accounts=raw_public_accounts == "1",
+            rate_limit_hmac_key=rate_limit_key,
             notify_base_url=os.environ.get("JNP_PAYMENT_NOTIFY_BASE_URL", "").rstrip("/"),
             alipay_app_id=os.environ.get("JNP_ALIPAY_APP_ID", ""),
             wechat_mchid=os.environ.get("JNP_WECHAT_MCHID", ""), plans=tuple(plans),

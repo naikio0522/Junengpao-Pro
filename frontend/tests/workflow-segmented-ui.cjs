@@ -3,7 +3,7 @@ const path = require('node:path')
 const assert = require('node:assert/strict')
 
 const pause = (ms = 60) => new Promise(resolve => setTimeout(resolve, ms))
-const labels = ['口播逻辑（测试版v0.1）', '随机混剪', '独立去重变换']
+const labels = ['口播逻辑（测试版v0.1）', '随机混剪', '独立去重变换', '短视频链接一键去水印', '成片转字幕']
 const groupSelector = '[role="group"][aria-label="你想让我怎么做？"]'
 
 app.whenReady().then(async () => {
@@ -26,6 +26,8 @@ app.whenReady().then(async () => {
     const thumb = document.querySelector('[data-testid="workflow-thumb"]')
     const mix = document.querySelector('[data-testid="workflow-pane-mix"]')
     const dedup = document.querySelector('[data-testid="workflow-pane-dedup"]')
+    const link = document.querySelector('[data-testid="workflow-pane-link-watermark"]')
+    const subtitle = document.querySelector('[data-testid="workflow-pane-subtitle"]')
     const rect = node => node.getBoundingClientRect().toJSON()
     return {
       labels: buttons.map(button => button.textContent.trim()),
@@ -38,6 +40,8 @@ app.whenReady().then(async () => {
         opacity: getComputedStyle(mix).opacity, transition: getComputedStyle(mix).transitionDuration },
       dedup: { hidden: dedup.getAttribute('aria-hidden'), visible: getComputedStyle(dedup).visibility,
         opacity: getComputedStyle(dedup).opacity, transition: getComputedStyle(dedup).transitionDuration },
+      link: { hidden: link.getAttribute('aria-hidden'), visible: getComputedStyle(link).visibility },
+      subtitle: { hidden: subtitle.getAttribute('aria-hidden'), visible: getComputedStyle(subtitle).visibility },
       viewportWidth: innerWidth,
     }
   })()`)
@@ -50,17 +54,23 @@ app.whenReady().then(async () => {
       const centered = Math.abs((thumb.left + thumb.right) / 2 - (button.left + button.right) / 2) < 4
         && Math.abs(thumb.width - button.width) < 4
       if (state.pressed[index] === 'true' && centered
-          && state.mix.visible === (index === 2 ? 'hidden' : 'visible')
-          && state.dedup.visible === (index === 2 ? 'visible' : 'hidden')) break
+          && state.mix.visible === (index <= 1 ? 'visible' : 'hidden')
+          && state.dedup.visible === (index === 2 ? 'visible' : 'hidden')
+          && state.link.visible === (index === 3 ? 'visible' : 'hidden')
+          && state.subtitle.visible === (index === 4 ? 'visible' : 'hidden')) break
       await pause(80)
     }
     assert.deepEqual(state.labels, labels)
     assert.deepEqual(state.pressed, labels.map((_, position) => position === index ? 'true' : 'false'),
       `exactly one workflow active: ${JSON.stringify(state.pressed)}`)
-    assert.equal(state.mix.hidden, index === 2 ? 'true' : 'false')
+    assert.equal(state.mix.hidden, index <= 1 ? 'false' : 'true')
     assert.equal(state.dedup.hidden, index === 2 ? 'false' : 'true')
-    assert.equal(state.mix.visible, index === 2 ? 'hidden' : 'visible')
+    assert.equal(state.link.hidden, index === 3 ? 'false' : 'true')
+    assert.equal(state.subtitle.hidden, index === 4 ? 'false' : 'true')
+    assert.equal(state.mix.visible, index <= 1 ? 'visible' : 'hidden')
     assert.equal(state.dedup.visible, index === 2 ? 'visible' : 'hidden')
+    assert.equal(state.link.visible, index === 3 ? 'visible' : 'hidden')
+    assert.equal(state.subtitle.visible, index === 4 ? 'visible' : 'hidden')
     const button = state.buttonRects[index]
     const thumb = state.thumbRect
     assert.ok(Math.abs((thumb.left + thumb.right) / 2 - (button.left + button.right) / 2) < 4,
@@ -87,6 +97,14 @@ app.whenReady().then(async () => {
     await expectMode(2)
     assert.equal(await evaluate(`Boolean(document.querySelector(${JSON.stringify('[aria-label="已有视频去重变换"]')}))`), true)
 
+    await evaluate(`document.querySelector(${JSON.stringify(buttonSelector(3))}).click()`)
+    await expectMode(3)
+    assert.equal(await evaluate(`Boolean(document.querySelector(${JSON.stringify('[aria-label="短视频分享链接"]')}))`), true)
+
+    await evaluate(`document.querySelector(${JSON.stringify(buttonSelector(4))}).click()`)
+    await expectMode(4)
+    assert.equal(await evaluate(`Boolean(document.querySelector(${JSON.stringify('[aria-label="待转字幕成片路径"]')}))`), true)
+
     await evaluate(`document.querySelector(${JSON.stringify(buttonSelector(0))}).click()`)
     await expectMode(0)
 
@@ -107,16 +125,16 @@ app.whenReady().then(async () => {
     }
     const start = await buttonCenter(0)
     const middle = await buttonCenter(1)
-    const end = await buttonCenter(2)
+    const end = await buttonCenter(4)
     await mouse('mouseMoved', start.x, start.y)
     await expectMode(0) // Hover must not switch workflows.
     await mouse('mousePressed', start.x, start.y, true)
     await mouse('mouseMoved', middle.x, middle.y, true)
     await expectMode(1) // Changes during the drag, not only after release.
     await mouse('mouseMoved', end.x, end.y, true)
-    await expectMode(2)
+    await expectMode(4)
     await mouse('mouseReleased', end.x, end.y)
-    await expectMode(2)
+    await expectMode(4)
 
     const key = async (name, code) => {
       for (const type of ['keyDown', 'keyUp']) {
@@ -131,13 +149,13 @@ app.whenReady().then(async () => {
     await key('ArrowRight', 39)
     await expectMode(1)
     await key('End', 35)
-    await expectMode(2)
+    await expectMode(4)
     await key('ArrowLeft', 37)
-    await expectMode(1)
+    await expectMode(3)
 
     win.setSize(700, 520)
     await pause(120)
-    const narrow = await expectMode(1)
+    const narrow = await expectMode(3)
     assert.ok(narrow.groupRect.right <= narrow.viewportWidth + 1,
       `workflow switch fits narrow window: ${JSON.stringify(narrow.groupRect)}`)
     for (const rect of narrow.buttonRects) {

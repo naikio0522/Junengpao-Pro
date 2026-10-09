@@ -642,11 +642,11 @@ class VideoMatrixCore:
         bgm_duration = t_total if cfg.get('apply_bgm_to_hook', True) else body_duration
 
         if cfg.get('enable_srt'):
-            srt_dir = str(cfg.get('srt_dir') or '').strip()
-            if not srt_dir or not os.path.isdir(srt_dir):
-                return False, "字幕已开启，但字幕目录不存在或未设置。"
-            if not self._scan_files(srt_dir, ('.srt',)):
-                return False, "字幕已开启，但字幕目录中没有找到 SRT 文件。"
+            srt_source = str(cfg.get('srt_dir') or '').strip()
+            if not srt_source or not os.path.exists(srt_source):
+                return False, "字幕已开启，但 SRT 文件或字幕目录不存在或未设置。"
+            if not self._scan_files(srt_source, ('.srt',)):
+                return False, "字幕已开启，但未找到可用的 SRT 文件。"
 
         hook_files = self._scan_files(cfg['hook_dir'], ('.mp4', '.mov'))
         grouped_body = cfg.get('body_mode', 'normal') == 'grouped'

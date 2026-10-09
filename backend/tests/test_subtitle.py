@@ -49,7 +49,7 @@ class SubtitleTests(unittest.TestCase):
         ok, message = core.pre_flight_check()
 
         self.assertFalse(ok)
-        self.assertIn("字幕目录不存在或未设置", message)
+        self.assertIn("SRT 文件或字幕目录不存在或未设置", message)
 
     def test_preflight_rejects_directory_without_srt(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -58,7 +58,23 @@ class SubtitleTests(unittest.TestCase):
             ok, message = core.pre_flight_check()
 
         self.assertFalse(ok)
-        self.assertIn("没有找到 SRT 文件", message)
+        self.assertIn("未找到可用的 SRT 文件", message)
+
+    def test_single_srt_file_is_accepted_as_subtitle_source(self):
+        with tempfile.TemporaryDirectory() as directory:
+            srt = Path(directory, "selected.srt")
+            srt.write_text(
+                "1\n00:00:00,100 --> 00:00:01,200\n测试字幕\n\n",
+                encoding="utf-8",
+            )
+            core = VideoMatrixCore(config(str(srt)), lambda _message: None, SharedMediaCache())
+
+            ok, message = core.pre_flight_check()
+            parsed = core.process_srt(str(srt), duration_sec=2.0)
+
+            self.assertFalse(ok)  # No Hook/Body in this focused configuration.
+            self.assertNotIn("SRT", message)
+            self.assertIsNotNone(parsed)
 
     def test_valid_srt_is_converted_for_ffmpeg(self):
         with tempfile.TemporaryDirectory() as directory:

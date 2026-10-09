@@ -1,12 +1,14 @@
 import os
 import sys
 import json
+import hmac
 import socket
 import threading
 import time
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from .api.routes import router
 from .api.accounts import router as account_router
@@ -14,6 +16,7 @@ from .api.standalone_variants import router as standalone_variant_router, standa
 from .api.subtitles import router as subtitle_router
 from .api.billing import router as billing_router
 from .api.watermark_removal import router as watermark_removal_router, watermark_removal_service
+from .api.link_watermark import router as link_watermark_router, link_watermark_service
 
 # 确保工作目录正确，以便找到 ffmpeg
 if getattr(sys, 'frozen', False):
@@ -22,16 +25,32 @@ if getattr(sys, 'frozen', False):
 app = FastAPI(
     title="巨能跑pro版 API",
     description="巨能跑pro版短视频矩阵自动化混剪后端 API",
-    version="0.1.6"
+    version="0.1.7"
 )
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    # Packaged Electron uses a file:// renderer (Origin: null). A sandboxed
+    # website can spoof that origin, so the per-launch API token below is the
+    # actual authorization boundary; CORS is defence in depth.
+    allow_origins=["null", "http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["Content-Type", "Accept", "Authorization", "X-VideoMatrix-Token"],
 )
+
+
+@app.middleware("http")
+async def require_desktop_api_token(request: Request, call_next):
+    # Electron injects a fresh 256-bit token into its own backend process.
+    # Manual developer/TestClient runs may omit the variable, but packaged
+    # desktop traffic cannot access any API endpoint without the token.
+    expected = os.environ.get("VIDEOMATRIX_API_TOKEN", "")
+    if expected and request.url.path.startswith("/api/") and request.method != "OPTIONS":
+        supplied = request.headers.get("X-VideoMatrix-Token", "")
+        if not hmac.compare_digest(supplied, expected):
+            return JSONResponse(status_code=403, content={"detail": "本机接口访问未授权"})
+    return await call_next(request)
 
 app.include_router(router, prefix="/api")
 app.include_router(account_router, prefix="/api")
@@ -39,6 +58,7 @@ app.include_router(standalone_variant_router, prefix="/api")
 app.include_router(subtitle_router, prefix="/api")
 app.include_router(billing_router, prefix="/api")
 app.include_router(watermark_removal_router, prefix="/api")
+app.include_router(link_watermark_router, prefix="/api")
 
 
 @app.get("/api/health")
@@ -106,6 +126,7 @@ def main() -> None:
                 task_service.stop_all_tasks()
                 standalone_variant_service.stop_all()
                 watermark_removal_service.stop_all()
+                link_watermark_service.stop_all()
                 server.should_exit = True
 
         threading.Thread(target=watch_parent, daemon=True).start()
@@ -114,6 +135,7 @@ def main() -> None:
     finally:
         standalone_variant_service.stop_all()
         watermark_removal_service.stop_all()
+        link_watermark_service.stop_all()
         listener.close()
 
 

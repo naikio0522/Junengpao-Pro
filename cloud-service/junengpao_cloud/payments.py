@@ -58,6 +58,8 @@ class PaymentService:
         self.gateways = gateways
 
     def _gateway(self, provider: str) -> PaymentGateway:
+        if self.settings.account_only:
+            raise PaymentUnavailable("当前仅开放账号服务，会员支付尚未启用")
         if provider not in {"alipay", "wechat"}:
             raise InvalidPayment("不支持的支付渠道")
         gateway = self.gateways.get(provider)
@@ -90,6 +92,8 @@ class PaymentService:
                 "plan_code": plan.code, "status": "pending", "pay_url": pay_url}
 
     def order_for_user(self, order_id: str, user_id: str) -> dict | None:
+        if self.settings.account_only:
+            raise PaymentUnavailable("当前仅开放账号服务，会员支付尚未启用")
         return self.repository.get_order_for_user(order_id, user_id)
 
     def process_notification(self, provider: str, raw_body: bytes,

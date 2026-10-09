@@ -13,6 +13,8 @@ import { AccountEntry } from './AccountEntry'
 import { CheckUpdatesButton } from './CheckUpdatesButton'
 import { StandaloneVariantPanel } from './StandaloneVariantPanel'
 import { WatermarkRemovalPanel } from './WatermarkRemovalPanel'
+import { LinkWatermarkPanel } from './LinkWatermarkPanel'
+import { SubtitleConversionPanel } from './SubtitleConversionPanel'
 import { WorkflowSegmentedControl, type WorkflowMode } from './WorkflowSegmentedControl'
 
 const RESOLUTION_PRESETS = [
@@ -377,15 +379,18 @@ export default function SinglePage() {
   const [preflightProgress, setPreflightProgress] = useState<{ percent: number; message: string } | null>(null)
   const [speechPreflight, setSpeechPreflight] = useState<{ configKey: string; items: PreflightReportItem[] } | null>(null)
   const [completionNotice, setCompletionNotice] = useState<string | null>(null)
-  const [workflow, setWorkflow] = useState<'mix' | 'dedup'>(() => localStorage.getItem('vm-workflow') === 'dedup' ? 'dedup' : 'mix')
+  const [workflow, setWorkflow] = useState<'mix' | 'dedup' | 'link_watermark' | 'subtitle'>(() => {
+    const saved = localStorage.getItem('vm-workflow')
+    return saved === 'dedup' || saved === 'link_watermark' || saved === 'subtitle' ? saved : 'mix'
+  })
   const [slideDirection, setSlideDirection] = useState<1 | -1>(1)
-  const workflowMode: WorkflowMode = workflow === 'dedup' ? 'dedup' : config.selection_mode === 'speech_logic' ? 'speech_logic' : 'random'
+  const workflowMode: WorkflowMode = workflow !== 'mix' ? workflow : config.selection_mode === 'speech_logic' ? 'speech_logic' : 'random'
   const chooseWorkflowMode = (mode: WorkflowMode) => {
     if (mode === workflowMode) return
-    const order: WorkflowMode[] = ['speech_logic', 'random', 'dedup']
+    const order: WorkflowMode[] = ['speech_logic', 'random', 'dedup', 'link_watermark', 'subtitle']
     setSlideDirection(order.indexOf(mode) > order.indexOf(workflowMode) ? 1 : -1)
-    if (mode === 'dedup') {
-      setWorkflow('dedup')
+    if (mode === 'dedup' || mode === 'link_watermark' || mode === 'subtitle') {
+      setWorkflow(mode)
       return
     }
     setWorkflow('mix')
@@ -598,7 +603,7 @@ export default function SinglePage() {
       window.electronAPI?.openPath(target)
     })
   }
-  const isFilePath = (value: string) => /\.(mp3|wav|m4a|aac|flac|ogg|opus|mp4|mov|mkv|avi|webm)$/i.test(value.trim())
+  const isFilePath = (value: string) => /\.(mp3|wav|m4a|aac|flac|ogg|opus|mp4|mov|mkv|avi|webm|srt)$/i.test(value.trim())
   const ensureRunConfig = () => {
     if (!config.hook_dir.trim()) {
       addToast('请选择 Hook 首段视频或文件夹（必填）', 'warning')
@@ -710,6 +715,18 @@ export default function SinglePage() {
     rememberBrowseDirectory('hook_dir', paths.at(-1)!, true)
     setConfig({ hook_dir: paths.join('; ') })
     addToast(`已选择 ${paths.length} 个 Hook 视频`, 'success')
+  }
+
+  const browseSubtitleFile = async () => {
+    if (!window.electronAPI) { addToast('请在 Electron 中运行', 'warning'); return }
+    const selected = await window.electronAPI.openFile(
+      [{ name: '带时间轴字幕', extensions: ['srt'] }],
+      browseStartDirectory('srt_dir', config.srt_dir || '', true),
+    )
+    if (!selected) return
+    rememberBrowseDirectory('srt_dir', selected, true)
+    setConfig({ srt_dir: selected, enable_srt: true })
+    addToast('已选择 SRT 字幕文件并自动开启', 'success')
   }
 
   const updateBodyGroup = (index: number, patch: Partial<(typeof config.body_groups)[number]>) => {
@@ -903,7 +920,7 @@ export default function SinglePage() {
         {/* Header */}
         <div className="vm-topbar flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 rounded-[18px] px-4 py-2.5 mb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.6</span></h1>
+            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.7</span></h1>
             <FeatureHelp tutorial />
             <ContactMe />
             <SponsorMe />
@@ -932,12 +949,20 @@ export default function SinglePage() {
         <section aria-label="你想让我怎么做？" className="vm-task-panel mb-3 w-full min-w-0 shrink-0 rounded-[18px] px-4 py-3">
           <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
             <h2 className="text-[15px] font-semibold tracking-tight text-foreground">你想让我怎么做？</h2>
-            <span className="text-[11px] text-muted-foreground">① 选择任务　② 添加素材　③ 调整参数并开始</span>
+            <span className="text-[11px] text-muted-foreground">{workflow === 'link_watermark'
+              ? '① 粘贴链接　② 解析视频　③ 选择目录并保存'
+              : workflow === 'subtitle'
+                ? '① 选择成片　② 生成 SRT　③ 在剪映中导入'
+                : '① 选择任务　② 添加素材　③ 调整参数并开始'}</span>
           </div>
           <WorkflowSegmentedControl value={workflowMode} onChange={chooseWorkflowMode} />
           <p key={workflowMode} className="vm-mode-copy mt-2 text-[11px] leading-5 text-muted-foreground">
             {workflow === 'dedup'
               ? '已有成片直接拖入或选择视频、文件夹；不需要 Hook / Body。原视频保留，处理结果另存。'
+              : workflow === 'link_watermark'
+                ? '粘贴已获授权的公开分享链接，解析可用视频源并保存；平台返回的视频是否无水印需要自行核对。'
+                : workflow === 'subtitle'
+                  ? '选择已有成片，离线识别原声并生成带时间轴的 SRT 字幕；可在剪映中导入。'
               : config.selection_mode === 'speech_logic'
                 ? '请先整理好对应的完整Hook首段和Body后段的文件夹内容；核对产品是否一致、台词是否通顺。该板块目前还在测试中，使用过程如遇到问题请点击上方“联系我”获取联系方式'
                 : '按设定时长从 Hook 和 Body 素材中抽取片段并拼接；适合不需要台词语义衔接的镜头。'}
@@ -964,6 +989,18 @@ export default function SinglePage() {
             <div className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1">
               <StandaloneVariantPanel onLog={appendLog} />
               <WatermarkRemovalPanel onLog={appendLog} />
+            </div>
+          </div>
+          <div data-testid="workflow-pane-link-watermark" aria-hidden={workflow !== 'link_watermark'}
+            className={`vm-workflow-pane ${workflow === 'link_watermark' ? 'is-active' : ''}`}>
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+              <LinkWatermarkPanel defaultOutputDir={config.base_out_dir} onLog={appendLog} />
+            </div>
+          </div>
+          <div data-testid="workflow-pane-subtitle" aria-hidden={workflow !== 'subtitle'}
+            className={`vm-workflow-pane ${workflow === 'subtitle' ? 'is-active' : ''}`}>
+            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
+              <SubtitleConversionPanel onLog={appendLog} />
             </div>
           </div>
           <div data-testid="workflow-pane-mix" aria-hidden={workflow !== 'mix'}
@@ -1043,27 +1080,19 @@ export default function SinglePage() {
                   onOpen={() => openConfiguredPath(config.voice_dir || '')}
                   bodyOnly={!config.apply_voice_to_hook} onBodyOnlyChange={(v) => setConfig({ apply_voice_to_hook: !v })}
                   onBrowse={() => browse('voice_dir')}       onClear={() => setConfig({ voice_dir: '' })} />
-                <AssetCard kind="srt"       label="字幕"      value={config.srt_dir || ''}
+                <AssetCard kind="srt"       label="字幕"      value={config.srt_dir || ''} pickAction="目录" secondaryAction="SRT 文件" onSecondaryAction={browseSubtitleFile}
                   onChange={(v) => setConfig({ srt_dir: v, enable_srt: Boolean(v.trim()) })}
-                  onOpen={() => openConfiguredPath(config.srt_dir || '')}
+                  onOpen={() => openConfiguredPath(config.srt_dir || '', /\.srt$/i.test(config.srt_dir || ''))}
                   enabled={config.enable_srt}
                   onEnabledChange={(enabled) => {
                     if (enabled && !config.srt_dir?.trim()) {
-                      addToast('请先选择字幕目录', 'warning')
+                      addToast('请先选择字幕目录或 SRT 文件', 'warning')
                       return
                     }
                     setConfig({ enable_srt: enabled })
                   }}
                   bodyOnly={!config.apply_srt_to_hook} onBodyOnlyChange={(v) => setConfig({ apply_srt_to_hook: !v })}
                   onBrowse={() => browse('srt_dir')}         onClear={() => setConfig({ srt_dir: '', enable_srt: false })} />
-                <div className="flex items-center justify-between gap-2 rounded-[5px] border border-border/[0.08] bg-foreground/[0.015] px-2.5 py-1.5">
-                  <span className="text-[10px] leading-4 text-muted-foreground">成片转字幕：离线识别并保存同名 SRT，剪映中导入即可；已有 SRT 会保留。</span>
-                  <button type="button" disabled={subtitleBusyPath !== null}
-                    onClick={() => void exportSubtitleForVideo()}
-                    className="shrink-0 rounded-[4px] border border-accent/45 px-2 py-1 text-[10px] font-semibold text-accent hover:bg-accent/10 disabled:cursor-wait disabled:opacity-50">
-                    {subtitleBusyPath ? '离线识别中…' : '选择成片生成 SRT'}
-                  </button>
-                </div>
                 {config.enable_srt && (
                   <div className="space-y-1 rounded-[5px] border border-accent/20 bg-accent/[0.035] px-2.5 py-1">
                     <div className="flex h-7 items-center gap-2">

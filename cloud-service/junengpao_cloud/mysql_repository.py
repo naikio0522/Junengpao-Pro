@@ -10,6 +10,7 @@ import pymysql
 from pymysql.cursors import DictCursor
 
 from .accounts import AccountAlreadyExists
+from .rate_limit import RateLimitExceeded
 from .config import Settings
 from .payments import InvalidPayment, VerifiedPayment
 
@@ -27,22 +28,67 @@ class MySqlRepository:
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.verify_mode = ssl.CERT_REQUIRED
         context.check_hostname = True
-        return pymysql.connect(
+        connection = pymysql.connect(
             host=self.settings.db_host, port=self.settings.db_port,
             user=self.settings.db_user, password=self.settings.db_password,
             database=self.settings.db_name, charset="utf8mb4", cursorclass=DictCursor,
             ssl=context, connect_timeout=5, read_timeout=15, write_timeout=15,
-            autocommit=False,
+            autocommit=False, local_infile=False, defer_connect=True,
         )
+        try:
+            # Fail before authentication if a future driver stops requiring
+            # TLS for an SSL context; never silently send credentials in clear.
+            if getattr(connection, "_ssl_required", False) is not True:
+                raise RuntimeError("数据库驱动无法强制 TLS")
+            connection.connect()
+            return connection
+        except Exception:
+            connection.close()
+            raise
 
     def ready(self) -> bool:
         with closing(self._connect()) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT 1 FROM account_users LIMIT 1")
                 cursor.execute("SELECT 1 FROM account_sessions LIMIT 1")
-                cursor.execute("SELECT 1 FROM account_memberships LIMIT 1")
-                cursor.execute("SELECT 1 FROM payment_orders LIMIT 1")
+                if self.settings.public_accounts:
+                    cursor.execute("SELECT 1 FROM account_rate_limits LIMIT 1")
+                if not self.settings.account_only:
+                    cursor.execute("SELECT 1 FROM account_memberships LIMIT 1")
+                    cursor.execute("SELECT 1 FROM payment_orders LIMIT 1")
         return True
+
+    def consume_rate_limits(self, buckets: list[tuple[str, int, int]], now: int) -> None:
+        """Atomically consume all IP/phone buckets in a stable lock order."""
+        with closing(self._connect()) as connection:
+            try:
+                with connection.cursor() as cursor:
+                    for digest, maximum, window_seconds in buckets:
+                        cursor.execute(
+                            "INSERT IGNORE INTO account_rate_limits "
+                            "(bucket_hash, window_started_epoch, attempts) VALUES (%s, %s, 0)",
+                            (digest, now),
+                        )
+                        cursor.execute(
+                            "SELECT window_started_epoch, attempts FROM account_rate_limits "
+                            "WHERE bucket_hash = %s FOR UPDATE", (digest,),
+                        )
+                        row = cursor.fetchone()
+                        if row is None:
+                            raise RuntimeError("限流记录无法读回")
+                        reset = int(row["window_started_epoch"]) <= now - window_seconds
+                        attempts = 0 if reset else int(row["attempts"])
+                        if attempts >= maximum:
+                            raise RateLimitExceeded
+                        cursor.execute(
+                            "UPDATE account_rate_limits SET window_started_epoch = %s, attempts = %s "
+                            "WHERE bucket_hash = %s",
+                            (now if reset else int(row["window_started_epoch"]), attempts + 1, digest),
+                        )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
 
     def create_user(self, user_id: str, phone: str, password_hash: str, created_at: str) -> dict:
         try:
@@ -101,6 +147,10 @@ class MySqlRepository:
             connection.commit()
 
     def membership_until(self, user_id: str) -> int | None:
+        if self.settings.account_only:
+            # Explicitly no paid entitlements until the membership migration
+            # and verified merchant adapters are deployed.
+            return None
         with closing(self._connect()) as connection:
             with connection.cursor() as cursor:
                 cursor.execute("SELECT valid_until_epoch FROM account_memberships WHERE user_id = %s", (user_id,))

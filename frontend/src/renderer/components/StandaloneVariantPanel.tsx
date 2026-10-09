@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
-import { ACCOUNT_TOKEN_KEY } from '../api/client'
+import { ACCOUNT_TOKEN_KEY, localApiTokenHeader } from '../api/client'
 
 type Strength = 'mild' | 'balanced' | 'strong'
 type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
@@ -46,6 +46,7 @@ async function variantRequest<T>(path: string, options?: RequestInit): Promise<T
         ? { Authorization: `Bearer ${sessionStorage.getItem(ACCOUNT_TOKEN_KEY)}` }
         : {}),
       ...options?.headers,
+      ...(await localApiTokenHeader()),
     },
   })
   if (!response.ok) {

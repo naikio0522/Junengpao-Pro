@@ -6,6 +6,12 @@ const getBaseUrl = async (): Promise<string> => {
   return 'http://127.0.0.1:8765/api'
 }
 
+export async function localApiTokenHeader(): Promise<Record<string, string>> {
+  // Older UI fixtures do not expose this bridge; the packaged app always does.
+  const token = await window.electronAPI?.getBackendToken?.()
+  return token ? { 'X-VideoMatrix-Token': token } : {}
+}
+
 export const ACCOUNT_TOKEN_KEY = 'vm-local-test-account-token'
 
 export class ApiError extends Error {
@@ -42,8 +48,12 @@ function formatApiError(detail: unknown, fallback: string): string {
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
   const baseUrl = await getBaseUrl()
   const res = await fetch(`${baseUrl}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...options,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options?.headers as Record<string, string> | undefined),
+      ...(await localApiTokenHeader()),
+    },
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
@@ -224,6 +234,38 @@ export interface SubtitleExportResult {
   status: 'created' | 'existing'
 }
 
+export interface LinkVideoFormat {
+  id: string
+  label: string
+  width: number | null
+  height: number | null
+  ext: string
+  filesize: number | null
+  watermark_status: 'original' | 'unverified'
+}
+
+export interface LinkVideoResolution {
+  resolve_id: string
+  platform: string
+  title: string
+  thumbnail_url: string | null
+  webpage_url: string
+  video_url: string | null
+  watermark_status: 'original' | 'unverified'
+  warning: string
+  formats: LinkVideoFormat[]
+}
+
+export interface LinkDownloadJob {
+  task_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
+  progress: number
+  stage: string
+  output_files: string[]
+  errors: string[]
+  log_lines: string[]
+}
+
 export interface WatermarkRegion {
   x: number
   y: number
@@ -348,7 +390,8 @@ async function streamPreflight(
   const baseUrl = await getBaseUrl()
   const res = await fetch(`${baseUrl}/preflight`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json',
+      ...(await localApiTokenHeader()) },
     body: JSON.stringify(normalizeConfigForRequest(config)),
   })
   if (!res.ok) {
@@ -411,7 +454,8 @@ async function streamBenchmark(
   const baseUrl = await getBaseUrl()
   const res = await fetch(`${baseUrl}/benchmark`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json',
+      ...(await localApiTokenHeader()) },
     body: JSON.stringify(normalizeConfigForRequest(config)),
   })
   if (!res.ok) {
@@ -530,6 +574,29 @@ export const api = {
       method: 'POST', body: JSON.stringify({ video_path: videoPath }),
     }),
 
+  resolveLinkVideo: (url: string) =>
+    request<LinkVideoResolution>('/link-watermark/resolve', {
+      method: 'POST', body: JSON.stringify({ url, authorized: true }),
+    }),
+
+  startLinkDownload: (input: { resolve_id: string; format_id?: string; output_dir: string; save_cover?: boolean }) =>
+    request<{ task_id: string }>('/link-watermark/jobs', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionStorage.getItem(ACCOUNT_TOKEN_KEY)
+          ? { Authorization: `Bearer ${sessionStorage.getItem(ACCOUNT_TOKEN_KEY)}` }
+          : {}),
+      },
+      body: JSON.stringify({ ...input, authorized: true }),
+    }),
+
+  getLinkDownloadJob: (taskId: string) =>
+    request<LinkDownloadJob>(`/link-watermark/jobs/${taskId}`),
+
+  stopLinkDownloadJob: (taskId: string) =>
+    request<{ message: string }>(`/link-watermark/jobs/${taskId}/stop`, { method: 'POST' }),
+
   detectVideoWatermark: (inputPath: string) =>
     request<WatermarkDetection>('/watermark-removal/detect', {
       method: 'POST', body: JSON.stringify({ input_path: inputPath }),
@@ -562,20 +629,39 @@ export const api = {
 
   streamLogs: async (taskId: string, onLog: (data: any) => void) => {
     const baseUrl = await getBaseUrl()
-    const eventSource = new EventSource(`${baseUrl}/tasks/${taskId}/stream`)
-    eventSource.onmessage = (e) => {
-      if (e.data === '[DONE]') {
-        eventSource.close()
-        return
+    const controller = new AbortController()
+    const headers = { Accept: 'text/event-stream', ...(await localApiTokenHeader()) }
+    // EventSource cannot send the per-launch token. Read the same SSE stream
+    // with fetch so the secret never has to be put in a URL or browser storage.
+    void (async () => {
+      const response = await fetch(`${baseUrl}/tasks/${taskId}/stream`, {
+        headers, signal: controller.signal,
+      })
+      if (!response.ok || !response.body) return
+      const reader = response.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+      const accept = (block: string) => {
+        const data = block.split(/\r?\n/).filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trimStart()).join('\n')
+        if (!data) return
+        if (data === '[DONE]') { controller.abort(); return }
+        try { onLog(JSON.parse(data)) }
+        catch { onLog({ log: data }) }
       }
       try {
-        onLog(JSON.parse(e.data))
-      } catch {
-        onLog({ log: e.data })
-      }
-    }
-    eventSource.onerror = () => eventSource.close()
-    return () => eventSource.close()
+        while (!controller.signal.aborted) {
+          const { value, done } = await reader.read()
+          if (value) buffer += decoder.decode(value, { stream: true })
+          const blocks = buffer.split(/\r?\n\r?\n/)
+          buffer = blocks.pop() || ''
+          blocks.forEach(accept)
+          if (done) break
+        }
+        if (buffer.trim()) accept(buffer)
+      } finally { reader.releaseLock() }
+    })().catch(() => { /* Same as EventSource: close quietly on network loss. */ })
+    return () => controller.abort()
   },
 
   scanDirectory: (dirPath: string, extensions: string[] = ['.mp4', '.mov']) =>

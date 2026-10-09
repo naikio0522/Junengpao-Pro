@@ -6,7 +6,7 @@ export const HELP: Record<string, string> = {
   body: '随机混剪从所选文件夹抽取后段，也可按 Body 1→4 分组。口播逻辑使用普通 Body，先转录原声，再选与 Hook 同一产品且台词自然承接的完整话段。',
   bgm: '可选。留空不加配乐，不影响原声或配音。普通模式抽取足够长的音频切片；按 BGM 时长模式随机抽一条完整音频，从头播放到尾，只有一条就使用该条。“Body 开”表示仅 Body 生效，“Body 关”表示全片生效。',
   voice: '可选。从目录随机选一条配音，从开头播放；不足部分保持静音。“Body 开”表示从 Hook 结束后开始，关闭则从视频开头开始。',
-  srt: '选择包含 SRT 文件的目录并开启字幕。随机选一份字幕，烧录进视频；时间轴超出成片部分会截断。Body 开表示字幕时间轴整体从 Hook 结束后开始。',
+  srt: '可以选择单个带时间轴的 SRT 文件，也可以选择包含多个 SRT 文件的目录。目录模式会随机选一份字幕；时间轴超出成片的部分会截断。Body 开表示字幕时间轴整体从 Hook 结束后开始。',
   watermark: '可选图片或 GIF 水印，叠加到画面中央。Body 开表示不覆盖 Hook。请使用有授权的素材。',
   output: '成品保存位置；每款会使用对应的输出目录。任务完成后，可在“产出”页打开视频或所在文件夹。',
   首段: '填写 Hook 最短和最长秒数，软件在范围内选择裁切时长；两端相同即固定秒数。勾选“按原素材时长”后忽略此范围，保留每个 Hook 的完整长度。',
@@ -60,7 +60,7 @@ export function FeatureHelp({ topic, title, tutorial = false }: { topic?: string
       } }}>
       <div className="help-heading"><h2 id={id}>{heading}</h2><button type="button" aria-label="关闭说明" onClick={() => dialog.current?.close()}>关闭</button></div>
       {tutorial ? <div className="tutorial-content">
-        <section><h3>先选“你想让我怎么做？”</h3><p>口播逻辑：转录原声，按同一产品接好 Hook 与 Body，并核对台词是否通顺；随机混剪：按时长抽镜头；独立去重变换：已有视频直接拖入或选择文件夹，不用准备 Hook / Body。选定后只填写对应任务的素材和参数。</p></section>
+        <section><h3>先选“你想让我怎么做？”</h3><p>口播逻辑：转录原声，按同一产品接好 Hook 与 Body；随机混剪：按时长抽镜头；独立去重变换：处理已有视频；短视频链接一键去水印：解析已授权的公开分享链接并保存可用源流；成片转字幕：离线识别并生成带时间轴的 SRT。选定后只填写对应任务的素材和参数。</p></section>
         <section><h3>1. 普通混剪</h3><p>选择 Hook 视频或文件夹、Body 文件夹和输出目录 → 设置首段、后段秒数范围与总片段数 → 填输出数量 → 预检 → 启动渲染。范围两端填相同数字即固定秒数。BGM 可留空，原声和配音独立设置。</p></section>
         <section><h3>2. 按顺序分组</h3><p>切换 Body“分组”，启用需要的组，为每组选择目录、片段数和单段时长。输出顺序：Hook → Body 1 → Body 2 → Body 3 → Body 4，组内随机。</p></section>
         <section><h3>3. 给完整音乐配视频</h3><p>选择 BGM → 开启“按 BGM 时长”。每条输出随机使用一条完整音频，Body 自动裁尾或补足；只有一首就始终用它。素材不足会提示，不会无限重复同一切片。</p><p>“Body 开”：总时长 = Hook + BGM；“Body 关”：全片以 BGM 为目标。Hook 已超过音乐时保留 Hook，提示后仍执行。</p></section>

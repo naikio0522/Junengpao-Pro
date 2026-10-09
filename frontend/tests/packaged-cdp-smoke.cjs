@@ -35,6 +35,16 @@ async function main() {
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms))
   try {
     assert.equal(await evaluate('document.body.innerText.includes("巨能跑pro版")'), true)
+    const apiGuard = await evaluate(`(async () => {
+      const port = await window.electronAPI.getBackendPort()
+      const url = 'http://127.0.0.1:' + port + '/api/health'
+      const denied = await fetch(url).then(response => response.status)
+      const token = await window.electronAPI.getBackendToken()
+      const allowed = await fetch(url, { headers: { 'X-VideoMatrix-Token': token } })
+        .then(response => response.status)
+      return { denied, allowed }
+    })()`)
+    assert.deepEqual(apiGuard, { denied: 403, allowed: 200 })
     assert.equal(await evaluate('Boolean(document.querySelector("button[aria-label=检查更新]"))'), true)
     if (await evaluate('document.querySelector("button[aria-label=检查更新]").getAttribute("aria-expanded") === "true"')) {
       await evaluate('document.querySelector("button[aria-label=检查更新]").click()')
@@ -47,7 +57,7 @@ async function main() {
       await sleep(500)
     }
     assert.match(panelText, /您已经是最新版本啦/)
-    console.log('PASS packaged v0.1.6 UI, update button, and no available update notice')
+    console.log('PASS packaged v0.1.7 UI, update button, and no available update notice')
   } finally {
     socket.close()
   }

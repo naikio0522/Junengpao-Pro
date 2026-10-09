@@ -16,7 +16,7 @@ class VideoConfig(BaseModel):
     bgm_dir: str = Field(default="", description="可选 BGM 目录或带音轨的视频文件")
     duration_mode: Literal["clips", "bgm"] = Field(default="clips", description="按片段数量或完整 BGM 时长生成")
     voice_dir: Optional[str] = Field(default=None, description="配音目录")
-    srt_dir: Optional[str] = Field(default=None, description="字幕目录")
+    srt_dir: Optional[str] = Field(default=None, description="SRT 字幕文件或目录")
     watermark_path: Optional[str] = Field(default=None, description="水印图片/GIF路径")
     base_out_dir: str = Field(default="", description="输出父目录")
     

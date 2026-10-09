@@ -8,6 +8,7 @@ export interface ElectronAPI {
   openPath: (filePath: string) => Promise<void>
   openExternalHttps: (url: string) => Promise<void>
   getBackendPort: () => Promise<number>
+  getBackendToken: () => Promise<string>
   checkForUpdates: () => Promise<UpdateCheckResult>
   downloadAndInstallUpdate: () => Promise<'canceled' | 'installer-launched' | 'dmg-opened'>
   onUpdateDownloadProgress: (listener: (progress: UpdateDownloadProgress) => void) => () => void
@@ -33,6 +34,7 @@ const api: ElectronAPI = {
   openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
   openExternalHttps: (url) => ipcRenderer.invoke('shell:openExternalHttps', url),
   getBackendPort: () => ipcRenderer.invoke('app:getBackendPort'),
+  getBackendToken: () => ipcRenderer.invoke('app:getBackendToken'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   downloadAndInstallUpdate: () => ipcRenderer.invoke('app:downloadAndInstallUpdate'),
   onUpdateDownloadProgress: listener => {
