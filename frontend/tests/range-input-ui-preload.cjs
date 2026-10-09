@@ -14,7 +14,10 @@ window.electronAPI = {
     return 'C:\\clips\\single-hook.mp4'
   },
   openDirectory: async () => 'C:\\clips\\hook-folder',
-  openVideoFiles: async () => null,
+  openVideoFiles: async (_defaultPath, extensions) => {
+    window.__hookFileFilters = [{ extensions }]
+    return ['C:\\clips\\single-hook.mp4']
+  },
   openPath: async () => {},
   checkForUpdates: async () => ({ status: 'current', currentVersion: '0.1.2', message: '' }),
   downloadAndInstallUpdate: async () => 'canceled',

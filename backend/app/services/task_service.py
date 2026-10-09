@@ -6,7 +6,6 @@ import threading
 import concurrent.futures
 import random
 import subprocess
-import shutil
 import tempfile
 from datetime import datetime
 from typing import Dict, List, Optional, Callable
@@ -15,11 +14,15 @@ from ..core.video_matrix import VideoMatrixCore, SharedMediaCache
 from ..core.video_variant import VideoVariantProcessor, derive_variant_seed
 from ..core.timeline import apply_timeline_totals
 from ..core.video_cover import RandomCoverProcessor
+from ..core.brand_watermark import apply_brand_watermark
 from ..core.hardware import HardwareSession
 from ..models.schemas import VideoConfig, TaskStatus
 
 
 class TaskService:
+    # 压测只是选并发，不应让一轮异常编码无限占用机器。
+    BENCHMARK_ROUND_TIMEOUT_SECONDS = 300
+
     def __init__(self, shared_cache: Optional[SharedMediaCache] = None):
         self.shared_cache = shared_cache or SharedMediaCache()
         self.tasks: Dict[str, TaskStatus] = {}
@@ -109,10 +112,13 @@ class TaskService:
             })
         return tasks
 
-    def create_task(self, config: VideoConfig) -> str:
+    def create_task(self, config: VideoConfig, *, is_member: bool = False) -> str:
         task_id = str(uuid.uuid4())
         raw_config = self._normalize_config(config.model_dump())
         task_cfg = raw_config.copy()
+        # The client cannot choose whether to suppress the brand watermark.
+        # Entitlement is resolved from the server-side account session.
+        task_cfg['_brand_watermark_required'] = not is_member
 
         status = TaskStatus(
             task_id=task_id,
@@ -156,7 +162,7 @@ class TaskService:
                 status.message = "找不到素材目录"
                 return
 
-            for t in tasks:
+            for task_number, t in enumerate(tasks):
                 if status.status == "stopped":
                     break
                 task_cfg = config.copy()
@@ -170,7 +176,28 @@ class TaskService:
                 os.makedirs(task_cfg['out_dir'], exist_ok=True)
 
                 core = VideoMatrixCore(task_cfg, log_cb, self.shared_cache)
-                ok, msg = core.pre_flight_check()
+
+                def report_preflight(stage: str, current: int, total: int,
+                                     task_number: int = task_number) -> None:
+                    if status.status == "stopped":
+                        return
+                    fraction = min(1.0, max(0.0, current / max(1, total)))
+                    if stage == 'scan':
+                        local_progress = 0.02
+                    elif stage == 'probe':
+                        end = 0.45 if task_cfg.get('selection_mode') == 'speech_logic' else 0.95
+                        local_progress = 0.02 + (end - 0.02) * fraction
+                    elif stage == 'transcribe':
+                        local_progress = 0.45 + 0.50 * fraction
+                    else:
+                        return
+                    status.progress = max(status.progress, min(14, int(
+                        15 * (task_number + local_progress) / len(tasks)
+                    )))
+                    status.updated_at = datetime.now()
+
+                ok, msg = core.pre_flight_check(progress_callback=report_preflight)
+                status.progress = max(status.progress, min(15, int(15 * (task_number + 1) / len(tasks))))
                 if ok:
                     cores.append(core)
                     with self.cores_lock:
@@ -195,27 +222,50 @@ class TaskService:
                         jobs.append((core, i))
 
             status.total = len(jobs)
+            status.progress = max(status.progress, 15)
             log_cb(f">>> [系统] 任务池组装完毕，即将并线生成 {len(jobs)} 个视频。")
 
             success_counts = {core.task_name: 0 for core in cores}
             completed = 0
+            partial_progress: Dict[tuple[int, int], float] = {}
+            progress_lock = threading.Lock()
+
+            def update_render_progress(key: tuple[int, int], fraction: float) -> None:
+                if status.status == 'stopped':
+                    return
+                with progress_lock:
+                    partial_progress[key] = max(partial_progress.get(key, 0.0), min(0.98, max(0.0, fraction)))
+                    status.progress = max(status.progress, min(99, int(
+                        15 + 85 * (completed + sum(partial_progress.values())) / len(jobs)
+                    )))
+                    status.updated_at = datetime.now()
 
             concurrent_limit = max(1, int(config.get('concurrent_tasks', 3)))
             with concurrent.futures.ThreadPoolExecutor(max_workers=concurrent_limit) as executor:
-                futures = {executor.submit(self._render_job, core, idx, status): core for core, idx in jobs}
+                futures = {
+                    executor.submit(
+                        self._render_job, core, idx, status,
+                        lambda fraction, key=(id(core), idx): update_render_progress(key, fraction),
+                    ): (core, idx)
+                    for core, idx in jobs
+                }
                 for future in concurrent.futures.as_completed(futures):
                     if status.status == "stopped":
                         break
-                    core = futures[future]
+                    core, idx = futures[future]
                     try:
                         if future.result():
                             success_counts[core.task_name] += 1
                     except Exception as e:
                         log_cb(f"[{core.task_name}] 渲染异常: {e}")
-                    completed += 1
-                    status.current = completed
-                    status.progress = int(completed / len(jobs) * 100)
-                    status.updated_at = datetime.now()
+                    with progress_lock:
+                        partial_progress.pop((id(core), idx), None)
+                        completed += 1
+                        status.current = completed
+                        status.progress = max(status.progress, min(99, int(
+                            15 + 85 * (completed + sum(partial_progress.values())) / len(jobs)
+                        )))
+                        status.updated_at = datetime.now()
 
             if status.status != "stopped":
                 output_count = sum(success_counts.values())
@@ -225,6 +275,7 @@ class TaskService:
                     log_cb(f">>> [失败] {status.message}")
                 else:
                     status.status = "completed"
+                    status.progress = 100
                     if output_count < len(jobs):
                         status.message = f"部分完成：成功 {output_count}/{len(jobs)} 条；请查看失败日志"
                         log_cb(f">>> [警告] {status.message}")
@@ -256,11 +307,21 @@ class TaskService:
         if "effective_concurrency" in values:
             status.effective_concurrency = max(0, int(values["effective_concurrency"]))
 
-    def _render_job(self, core: VideoMatrixCore, idx: int, status: TaskStatus) -> bool:
+    def _render_job(self, core: VideoMatrixCore, idx: int, status: TaskStatus,
+                    on_progress: Optional[Callable[[float], None]] = None) -> bool:
         if status.status == "stopped" or not core.is_running:
             return False
-        result, output_path, elapsed = core.render_single_video(idx, return_result=True)
+        variant_share = 0.13 if core.config.get('enable_variants') else 0.0
+        cover_share = 0.06 if core.config.get('enable_random_cover') else 0.0
+        brand_share = 0.16 if core.config.get('_brand_watermark_required') else 0.0
+        render_share = 1.0 - variant_share - cover_share - brand_share
+        render_kwargs = {'return_result': True}
+        if on_progress is not None:
+            render_kwargs['on_progress'] = lambda fraction: on_progress(render_share * fraction)
+        result, output_path, elapsed = core.render_single_video(idx, **render_kwargs)
         output_config = getattr(core, 'output_configs', {}).pop(idx, core.config)
+        if on_progress is not None and result:
+            on_progress(render_share)
         if result and output_path and core.config.get('enable_variants') and not output_config.get('_variant_applied'):
             variant_started = time.time()
             seed = derive_variant_seed(
@@ -273,6 +334,9 @@ class TaskService:
                     seed,
                     is_cancelled=lambda: status.status == "stopped" or not core.is_running,
                     on_process=lambda process: self._track_variant_process(status.task_id, process),
+                    on_stage=(lambda _message, fraction: on_progress(
+                        render_share + variant_share * fraction,
+                    ) if fraction is not None else None) if on_progress is not None else None,
                 )
             except Exception as exc:
                 ok, error, summary = False, str(exc), None
@@ -287,6 +351,8 @@ class TaskService:
                 )
             else:
                 core.log(f"    [{core.task_name}] 成品变换警告：{error or '处理失败'}，已保留原成片。")
+        if on_progress is not None and result:
+            on_progress(render_share + variant_share)
         if result and output_path and core.config.get('enable_random_cover'):
             cover_started = time.time()
             seed = derive_variant_seed(
@@ -307,6 +373,28 @@ class TaskService:
                 core.log(f"    [{core.task_name}] 随机封面完成（{summary['mode']}）：取样 {summary['sample_time']:.3f} 秒，zoom={summary['zoom']:.3f}")
             else:
                 core.log(f"    [{core.task_name}] 随机封面警告：{error or '处理失败'}，已保留原成片。")
+        if on_progress is not None and result:
+            on_progress(render_share + variant_share + cover_share)
+        if result and output_path and output_config.get('_brand_watermark_required'):
+            brand_started = time.time()
+            ok, error = apply_brand_watermark(
+                output_path, output_config,
+                is_cancelled=lambda: status.status == 'stopped' or not core.is_running,
+                on_process=lambda process: self._track_variant_process(status.task_id, process),
+                on_progress=(lambda fraction: on_progress(
+                    render_share + variant_share + cover_share + brand_share * fraction,
+                )) if on_progress is not None else None,
+            )
+            elapsed = round((elapsed or 0) + time.time() - brand_started, 1)
+            if not ok:
+                # Fail closed: a free export must never be handed off without
+                # its required brand mark, including when FFmpeg is unavailable.
+                VideoVariantProcessor._unlink_with_retry(output_path)
+                core.log(f"    [{core.task_name}] 品牌水印失败：{error or '未知错误'}；未保留无水印成片。")
+                return False
+            core.log(f"    [{core.task_name}] 已为非会员成片叠加半透明俊小白水印。")
+        if on_progress is not None and result:
+            on_progress(1.0)
         if result and output_path and status.task_id in self.tasks:
             if output_path not in self.tasks[status.task_id].output_files:
                 self.tasks[status.task_id].output_files.append(output_path)
@@ -458,62 +546,124 @@ class TaskService:
             progress_callback(100, '全部素材预检完成')
         return {"ok": any(item["ok"] for item in report), "capacity": cap_text, "report": report}
 
-    def get_benchmark(self, config: VideoConfig) -> dict:
+    def get_benchmark(self, config: VideoConfig,
+                      progress_callback: Optional[Callable[[int, str], None]] = None) -> dict:
         raw_config = self._normalize_config(config.model_dump())
         tasks = self._get_tasks_from_config(raw_config)
         if not tasks:
+            if progress_callback:
+                progress_callback(100, '压测结束：素材不足')
             return {"error": "素材不足以支撑压测"}
 
         results = {}
         log_cb = lambda x: None
+        completed_steps = 0
+        total_steps = sum(1 + n for n in range(1, 5))
+        warnings = []
 
-        for n in range(1, 5):
-            test_cfg = raw_config.copy()
-            benchmark_dir = tempfile.mkdtemp(prefix="videomatrix-benchmark-")
-            test_cfg.update({
-                'hook_dir': tasks[0]['hook_dir'],
-                'body_dirs': tasks[0]['body_dirs'],
-                'body_groups': raw_config.get('body_groups') or [],
-                'out_dir': benchmark_dir,
-                'target_count': 2,
-                'task_name': 'Test'
-            })
-            try:
-                os.makedirs(test_cfg['out_dir'], exist_ok=True)
-                # Never consume production usage history during a benchmark.
-                core = VideoMatrixCore(test_cfg, log_cb, SharedMediaCache(benchmark_dir))
-                if not core.pre_flight_check()[0]:
-                    return {"error": "素材不足以支撑压测"}
-                benchmark_status = TaskStatus(
-                    task_id=f"benchmark-{n}", task_name="Benchmark", status="running",
-                    created_at=datetime.now(), total=n,
-                )
+        def report(message: str, *, finished: bool = False):
+            if progress_callback:
+                percent = 100 if finished else min(99, int(completed_steps / total_steps * 100))
+                progress_callback(percent, message)
 
-                start_t = time.time()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=n) as ex:
-                    fs = [ex.submit(self._render_job, core, i, benchmark_status)
-                          for i in range(1, n + 1)]
-                    results_raw = [future.result() for future in fs]
-                elapsed = time.time() - start_t
-                successful = [item for item in results_raw if item]
-                if len(successful) != n:
-                    continue
-                t_per_v = elapsed / n
-                results[n] = {
-                    "concurrent": n,
-                    "total_time": round(elapsed, 2),
-                    "avg_per_video": round(t_per_v, 2)
-                }
-            finally:
-                shutil.rmtree(benchmark_dir, ignore_errors=True)
+        report('准备压测素材')
+        # All rounds share probe metadata, but never production usage history.
+        # Reset the temporary usage history before each round so one round does
+        # not exhaust Hook slices for the next measurement.
+        with tempfile.TemporaryDirectory(prefix='videomatrix-benchmark-') as benchmark_root:
+            benchmark_cache = SharedMediaCache(os.path.join(benchmark_root, 'cache'))
+            for n in range(1, 5):
+                test_cfg = raw_config.copy()
+                benchmark_dir = os.path.join(benchmark_root, f'{n}-workers')
+                test_cfg.update({
+                    'hook_dir': tasks[0]['hook_dir'],
+                    'body_dirs': tasks[0]['body_dirs'],
+                    'body_groups': raw_config.get('body_groups') or [],
+                    'out_dir': benchmark_dir,
+                    'target_count': n,
+                    'task_name': 'Test'
+                })
+                os.makedirs(benchmark_dir, exist_ok=True)
+                with benchmark_cache.lock:
+                    benchmark_cache.usage_history.clear()
+                core = None
+                try:
+                    report(f'{n} 路并发：检查素材')
+                    core = VideoMatrixCore(test_cfg, log_cb, benchmark_cache)
+                    ok, message = core.pre_flight_check()
+                    completed_steps += 1
+                    report(f'{n} 路并发：素材检查完成')
+                    if not ok:
+                        if n == 1:
+                            report('压测结束：素材不足', finished=True)
+                            return {"error": f"素材不足以支撑压测：{message}"}
+                        warnings.append(f'{n} 路及更高并发未测试：{message}')
+                        completed_steps += n
+                        report(f'{n} 路并发：素材不足，已跳过')
+                        break
+                    if (int(core.config.get('target_count', n)) < n
+                            or isinstance(core.n_total, int) and core.n_total < n):
+                        warnings.append(f'{n} 路及更高并发未测试：当前素材不足以生成 {n} 条不同成片')
+                        completed_steps += n
+                        report(f'{n} 路并发：可用成片不足，已跳过')
+                        break
+
+                    benchmark_status = TaskStatus(
+                        task_id=f"benchmark-{n}", task_name="Benchmark", status="running",
+                        created_at=datetime.now(), total=n,
+                    )
+                    start_t = time.monotonic()
+                    completed_round = 0
+                    successful = 0
+                    timed_out = False
+                    report(f'{n} 路并发：正在渲染 0/{n} 条')
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=n) as executor:
+                        futures = [executor.submit(self._render_job, core, i, benchmark_status)
+                                   for i in range(1, n + 1)]
+                        try:
+                            for future in concurrent.futures.as_completed(
+                                    futures, timeout=self.BENCHMARK_ROUND_TIMEOUT_SECONDS):
+                                try:
+                                    successful += bool(future.result())
+                                except Exception as exc:
+                                    warnings.append(f'{n} 路并发有成片失败：{exc}')
+                                completed_round += 1
+                                completed_steps += 1
+                                report(f'{n} 路并发：已完成 {completed_round}/{n} 条')
+                        except concurrent.futures.TimeoutError:
+                            timed_out = True
+                            benchmark_status.status = 'stopped'
+                            core.stop()
+                            for future in futures:
+                                future.cancel()
+                            completed_steps += n - completed_round
+                            warnings.append(f'{n} 路并发超过 {self.BENCHMARK_ROUND_TIMEOUT_SECONDS} 秒，已停止该轮压测')
+                            report(f'{n} 路并发：超时，已停止该轮')
+                    if timed_out:
+                        break
+                    elapsed = time.monotonic() - start_t
+                    if successful != n:
+                        warnings.append(f'{n} 路并发仅成功 {successful}/{n} 条，未用于推荐')
+                        continue
+                    results[n] = {
+                        "concurrent": n,
+                        "total_time": round(elapsed, 2),
+                        "avg_per_video": round(elapsed / n, 2),
+                    }
+                finally:
+                    if core is not None:
+                        core.temp_dir.cleanup()
 
         if not results:
-            return {"error": "压测期间没有成功完成可比较的成品"}
+            report('压测结束：没有成功的测试成片', finished=True)
+            return {"error": "压测期间没有成功完成可比较的成品", "warnings": warnings}
         best_n = min(results, key=lambda k: results[k]["avg_per_video"])
+        report('智能压测完成', finished=True)
         return {
             "results": results,
             "best_concurrent": best_n,
-            "best_result": results[best_n]
+            "best_result": results[best_n],
+            "warnings": warnings,
         }
 
 

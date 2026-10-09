@@ -52,6 +52,7 @@ async function main() {
       await page.getByRole('button', { name: '预检产能', exact: true }).click()
       const progress = page.getByRole('progressbar', { name: '预检产能进度' })
       await progress.waitFor()
+      assert.equal(await page.getByRole('button', { name: '预检产能', exact: true }).locator('[role="progressbar"]').count(), 1)
       await page.waitForFunction(() => document.querySelector('[aria-label="预检产能进度"]')?.getAttribute('aria-valuenow') === '100')
       assert.equal(await progress.getAttribute('aria-valuenow'), '100')
       await page.getByRole('button', { name: '预检产能', exact: true }).waitFor()

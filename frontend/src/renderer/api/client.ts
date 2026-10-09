@@ -6,6 +6,15 @@ const getBaseUrl = async (): Promise<string> => {
   return 'http://127.0.0.1:8765/api'
 }
 
+export const ACCOUNT_TOKEN_KEY = 'vm-local-test-account-token'
+
+export class ApiError extends Error {
+  constructor(message: string, public readonly status: number) {
+    super(message)
+    this.name = 'ApiError'
+  }
+}
+
 function formatApiError(detail: unknown, fallback: string): string {
   const fieldLabels: Record<string, string> = {
     hook_r: 'Hook 重叠率', body_r: 'Body 重叠率', bgm_r: 'BGM 重叠率',
@@ -38,7 +47,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
   })
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: 'Unknown error' }))
-    throw new Error(formatApiError(err.detail, `请求失败（HTTP ${res.status}）`))
+    throw new ApiError(formatApiError(err.detail, `请求失败（HTTP ${res.status}）`), res.status)
   }
   return res.json()
 }
@@ -207,15 +216,74 @@ export interface TaskStatus {
   effective_concurrency?: number
 }
 
+export interface SubtitleExportResult {
+  video_path: string
+  srt_path: string
+  folder: string
+  cue_count: number
+  status: 'created' | 'existing'
+}
+
+export interface WatermarkRegion {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface WatermarkDetection {
+  width: number
+  height: number
+  region: WatermarkRegion | null
+  confidence: number
+  preview: string
+  message: string
+}
+
+export interface WatermarkRemovalJob {
+  task_id: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
+  progress: number
+  current: number
+  total: number
+  output_files: string[]
+  errors: string[]
+  log_lines: string[]
+  message?: string
+}
+
 export interface AccountUser {
   id: number | string
   phone: string
   created_at: string
+  phone_verified?: boolean
+  is_member?: boolean
+  member_until?: string | null
 }
 
 export interface AccountSession {
   token: string
   user: AccountUser
+}
+
+export interface AccountMode {
+  mode: 'local_test' | 'cloud'
+}
+
+export interface MembershipPlan {
+  code: string
+  title: string
+  amount_fen: number
+  duration_days: number
+}
+
+export interface MembershipOrder {
+  order_id: string
+  provider: 'alipay' | 'wechat'
+  plan_code: string
+  amount_fen: number
+  status: 'pending' | 'paid' | 'failed' | 'closed'
+  pay_url?: string
 }
 
 export interface SpeechLogicPreview {
@@ -336,8 +404,72 @@ async function streamPreflight(
   return result
 }
 
+async function streamBenchmark(
+  config: VideoConfig,
+  onProgress: (percent: number, message: string) => void,
+): Promise<any> {
+  const baseUrl = await getBaseUrl()
+  const res = await fetch(`${baseUrl}/benchmark`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
+    body: JSON.stringify(normalizeConfigForRequest(config)),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unknown error' }))
+    throw new Error(formatApiError(error.detail, `请求失败（HTTP ${res.status}）`))
+  }
+  if (!res.headers.get('content-type')?.includes('text/event-stream') || !res.body) {
+    const result = await res.json()
+    onProgress(100, result.error ? '压测结束：未找到可用成片' : '智能压测完成')
+    return result
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: any
+  const acceptEvent = (block: string) => {
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (!data) return
+    const event = JSON.parse(data) as {
+      type: 'progress' | 'result' | 'error'
+      percent?: number
+      message?: string
+      result?: any
+    }
+    if (event.type === 'progress' && typeof event.percent === 'number') {
+      onProgress(Math.max(0, Math.min(100, event.percent)), event.message || '')
+    } else if (event.type === 'result') {
+      result = event.result
+    } else if (event.type === 'error') {
+      throw new Error(event.message || '压测失败')
+    }
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (value) buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split(/\r?\n\r?\n/)
+      buffer = blocks.pop() || ''
+      blocks.forEach(acceptEvent)
+      if (done) break
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) acceptEvent(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+  if (!result) throw new Error('压测连接中断，未收到结果')
+  return result
+}
+
 export const api = {
   health: () => request<{ status: string }>('/health'),
+
+  accountMode: () => request<AccountMode>('/account/mode'),
 
   registerAccount: (phone: string, password: string) =>
     request<AccountSession>('/account/register', {
@@ -359,9 +491,28 @@ export const api = {
       method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
     }),
 
+  membershipPlans: () => request<MembershipPlan[]>('/membership/plans'),
+
+  createMembershipOrder: (token: string, provider: 'alipay' | 'wechat', planCode: string) =>
+    request<MembershipOrder>('/membership/orders', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ provider, plan_code: planCode }),
+    }),
+
+  membershipOrder: (token: string, orderId: string) =>
+    request<MembershipOrder>(`/membership/orders/${orderId}`, {
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    }),
+
   createTask: (config: VideoConfig) =>
     request<{ task_id: string; message: string }>('/tasks', {
       method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(sessionStorage.getItem(ACCOUNT_TOKEN_KEY)
+          ? { Authorization: `Bearer ${sessionStorage.getItem(ACCOUNT_TOKEN_KEY)}` }
+          : {}),
+      },
       body: JSON.stringify({ config: normalizeConfigForRequest(config) }),
     }),
 
@@ -373,6 +524,41 @@ export const api = {
     request<{ message: string }>(`/tasks/${taskId}/stop`, { method: 'POST' }),
 
   getLogs: (taskId: string) => request<{ logs: string[] }>(`/tasks/${taskId}/logs`),
+
+  exportSubtitleSrt: (videoPath: string) =>
+    request<SubtitleExportResult>('/subtitles/srt', {
+      method: 'POST', body: JSON.stringify({ video_path: videoPath }),
+    }),
+
+  detectVideoWatermark: (inputPath: string) =>
+    request<WatermarkDetection>('/watermark-removal/detect', {
+      method: 'POST', body: JSON.stringify({ input_path: inputPath }),
+    }),
+
+  startWatermarkRemoval: (input: {
+    input_paths: string[]
+    output_dir: string
+    mode: 'auto' | 'manual'
+    region?: WatermarkRegion
+    reference_width?: number
+    reference_height?: number
+    authorized: boolean
+  }) => request<{ task_id: string }>('/watermark-removal/jobs', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionStorage.getItem(ACCOUNT_TOKEN_KEY)
+        ? { Authorization: `Bearer ${sessionStorage.getItem(ACCOUNT_TOKEN_KEY)}` }
+        : {}),
+    },
+    body: JSON.stringify(input),
+  }),
+
+  getWatermarkRemovalJob: (taskId: string) =>
+    request<WatermarkRemovalJob>(`/watermark-removal/jobs/${taskId}`),
+
+  stopWatermarkRemovalJob: (taskId: string) =>
+    request<{ message: string }>(`/watermark-removal/jobs/${taskId}/stop`, { method: 'POST' }),
 
   streamLogs: async (taskId: string, onLog: (data: any) => void) => {
     const baseUrl = await getBaseUrl()
@@ -401,11 +587,13 @@ export const api = {
   probeFile: (filePath: string) =>
     request<any>(`/probe?file_path=${encodeURIComponent(filePath)}`, { method: 'POST' }),
 
-  benchmark: (config: VideoConfig) =>
-    request<any>('/benchmark', {
-      method: 'POST',
-      body: JSON.stringify(normalizeConfigForRequest(config)),
-    }),
+  benchmark: (config: VideoConfig, onProgress?: (percent: number, message: string) => void) =>
+    onProgress
+      ? streamBenchmark(config, onProgress)
+      : request<any>('/benchmark', {
+          method: 'POST',
+          body: JSON.stringify(normalizeConfigForRequest(config)),
+        }),
 
   preflight: (config: VideoConfig, onProgress?: (percent: number, message: string) => void) =>
     onProgress

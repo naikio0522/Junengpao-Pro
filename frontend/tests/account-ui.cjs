@@ -49,7 +49,12 @@ app.whenReady().then(async () => {
     await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] button")].find(node => node.textContent.trim() === "注册并登录").click()')
     await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("我的账户")')
     assert.equal(await evaluate('window.__accountCalls.some(call => call.path.endsWith("/register") && call.method === "POST" && call.phone === "13800138000" && call.passwordMatchesExpected)'), true)
-    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("尚未接入云端数据库或短信验证")'), true)
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("账号目前保存在本机测试库")'), true)
+    await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] button")].find(node => node.textContent.trim() === "会员充值").click()')
+    await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("正式商户订单和回调验签服务未接通")')
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("正式商户订单和回调验签服务未接通")'), true)
+    assert.equal(await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] button")].filter(node => /支付宝支付|微信支付/.test(node.textContent)).every(node => node.disabled)'), true)
+    await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] button")].find(node => node.textContent.trim() === "返回账户").click()')
     assert.equal(await evaluate('document.querySelector("input[aria-label=账户密码]")'), null)
     assert.equal(await evaluate(`(() => {
       const persisted = JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } });
@@ -62,6 +67,22 @@ app.whenReady().then(async () => {
     await reloaded
     await waitFor('Boolean(document.querySelector("button[aria-label=账户信息]"))')
     assert.equal(await evaluate('window.__accountCalls.some(call => call.path.endsWith("/me") && call.bearer?.startsWith("Bearer "))'), true)
+
+    await evaluate('sessionStorage.setItem("__test_account_mode", "cloud"); sessionStorage.setItem("__test_account_me_status", "503")')
+    const unavailableReload = new Promise(resolve => win.webContents.once('did-finish-load', resolve))
+    win.webContents.reload()
+    await unavailableReload
+    await waitFor('Boolean(document.querySelector("button[aria-label=登录或注册]"))')
+    await evaluate('document.querySelector("button[aria-label=登录或注册]").click()')
+    await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("登录凭证已保留")')
+    assert.equal(await evaluate('sessionStorage.getItem("vm-local-test-account-token") !== null'), true, '503 must not destroy a valid session')
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("账号由云端服务保存")'), true)
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("仅在本机保存测试账户")'), false)
+    await evaluate('sessionStorage.removeItem("__test_account_me_status"); [...document.querySelectorAll("[role=dialog][aria-label=账户] button")].find(node => node.textContent.trim() === "重试检查").click()')
+    await waitFor('Boolean(document.querySelector("button[aria-label=账户信息]"))')
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("账号由云端服务保存")'), true)
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("账号目前保存在本机测试库")'), false)
+
     await evaluate('document.querySelector("button[aria-label=账户信息]").click()')
     await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] button")].find(node => node.textContent.trim() === "退出登录").click()')
     await waitFor('Boolean(document.querySelector("button[aria-label=登录或注册]"))')
@@ -75,7 +96,16 @@ app.whenReady().then(async () => {
     await evaluate('document.querySelector("[role=dialog][aria-label=账户] button[type=submit]").click()')
     await waitFor('Boolean(document.querySelector("button[aria-label=账户信息]"))')
     assert.equal(await evaluate('window.__accountCalls.some(call => call.path.endsWith("/login") && call.passwordMatchesExpected)'), true)
-    console.log('PASS account UI: local disclosure, register, session restore, logout, login, no password persistence')
+    await evaluate('sessionStorage.setItem("__test_account_me_status", "401")')
+    const expiredReload = new Promise(resolve => win.webContents.once('did-finish-load', resolve))
+    win.webContents.reload()
+    await expiredReload
+    await waitFor('sessionStorage.getItem("vm-local-test-account-token") === null')
+    await evaluate('document.querySelector("button[aria-label=登录或注册]").click()')
+    await waitFor('document.querySelector("[role=dialog][aria-label=账户]")?.innerText.includes("登录已失效")')
+    await evaluate('[...document.querySelectorAll("[role=dialog][aria-label=账户] [role=tab]")].find(node => node.textContent.trim() === "注册").click()')
+    assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("注册云端账户")'), true)
+    console.log('PASS account UI: local/cloud disclosure, transient 503 retry, 401 cleanup, register, logout, login, no password persistence')
     app.exit(0)
   } catch (error) {
     console.error(error)

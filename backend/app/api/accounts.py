@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import re
+import os
 from functools import lru_cache
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -13,6 +15,7 @@ from ..services.account_service import (
     AccountAlreadyExists, AccountService, InvalidCredentials, InvalidSession,
     SQLiteAccountRepository,
 )
+from ..services.remote_account_service import AccountServiceUnavailable, RemoteAccountService
 
 
 router = APIRouter(prefix="/account", tags=["account"])
@@ -44,6 +47,8 @@ class AccountUser(BaseModel):
     phone: str
     created_at: str
     phone_verified: bool
+    is_member: bool = False
+    member_until: str | None = None
 
 
 class SessionResponse(BaseModel):
@@ -55,8 +60,15 @@ class UserResponse(BaseModel):
     user: AccountUser
 
 
+class AccountModeResponse(BaseModel):
+    mode: Literal["local_test", "cloud"]
+
+
 @lru_cache(maxsize=1)
-def get_account_service() -> AccountService:
+def get_account_service() -> AccountService | RemoteAccountService:
+    cloud_url = os.environ.get('JNP_ACCOUNT_API_URL', '').strip()
+    if cloud_url:
+        return RemoteAccountService(cloud_url)
     return AccountService(SQLiteAccountRepository())
 
 
@@ -66,8 +78,13 @@ def get_token(credentials: HTTPAuthorizationCredentials | None = Depends(bearer)
     return credentials.credentials
 
 
+@router.get("/mode", response_model=AccountModeResponse)
+def account_mode(accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
+    return {"mode": "cloud" if isinstance(accounts, RemoteAccountService) else "local_test"}
+
+
 @router.post("/register", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
-def register(payload: AccountCredentials, accounts: AccountService = Depends(get_account_service)):
+def register(payload: AccountCredentials, accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
     password = payload.password.get_secret_value()
     if not 8 <= len(password) <= 128 or not password.strip():
         raise HTTPException(status_code=400, detail="密码长度需为 8–128 位")
@@ -75,29 +92,38 @@ def register(payload: AccountCredentials, accounts: AccountService = Depends(get
         return accounts.register(payload.phone, password)
     except AccountAlreadyExists:
         raise HTTPException(status_code=409, detail="无法完成注册，请尝试登录或更换手机号") from None
+    except AccountServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/login", response_model=SessionResponse)
-def login(payload: AccountCredentials, accounts: AccountService = Depends(get_account_service)):
+def login(payload: AccountCredentials, accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
     try:
         return accounts.login(payload.phone, payload.password.get_secret_value())
     except InvalidCredentials:
         raise HTTPException(status_code=401, detail="手机号或密码错误") from None
+    except AccountServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.get("/me", response_model=UserResponse)
-def me(token: str = Depends(get_token), accounts: AccountService = Depends(get_account_service)):
+def me(token: str = Depends(get_token), accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
     try:
         return accounts.me(token)
     except InvalidSession:
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录") from None
+    except AccountServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post("/logout")
-def logout(token: str = Depends(get_token), accounts: AccountService = Depends(get_account_service)):
+def logout(token: str = Depends(get_token), accounts: AccountService | RemoteAccountService = Depends(get_account_service)):
     try:
         accounts.me(token)
     except InvalidSession:
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录") from None
-    accounts.logout(token)
+    try:
+        accounts.logout(token)
+    except AccountServiceUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     return {"message": "已退出登录"}

@@ -22,7 +22,7 @@ app.whenReady().then(async () => {
     setter.call(input, ${JSON.stringify(value)});
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
-  const click = async label => evaluate(`[...document.querySelectorAll('button')].find(node => node.textContent.trim() === ${JSON.stringify(label)}).click()`)
+  const click = async label => evaluate(`[...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === ${JSON.stringify(label)} || node.textContent.trim() === ${JSON.stringify(label)}).click()`)
   try {
     await win.loadFile(path.join(__dirname, '../dist/renderer/index.html'))
     for (let i = 0; i < 50; i++) {

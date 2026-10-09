@@ -97,6 +97,11 @@ class AccountRepository(Protocol):
 
     def delete_session(self, token_hash: str) -> None: ...
 
+    def membership_until(self, user_id: str) -> int | None: ...
+
+    def apply_verified_payment(self, user_id: str, order_id: str,
+                               duration_days: int, paid_at: int) -> int: ...
+
 
 class SQLiteAccountRepository:
     def __init__(self, path: Path | str | None = None):
@@ -136,6 +141,17 @@ class SQLiteAccountRepository:
                     );
                     CREATE INDEX IF NOT EXISTS idx_account_sessions_expiry
                     ON account_sessions(expires_at);
+                    CREATE TABLE IF NOT EXISTS account_memberships (
+                        user_id TEXT PRIMARY KEY REFERENCES account_users(id) ON DELETE CASCADE,
+                        valid_until_epoch INTEGER NOT NULL,
+                        updated_at_epoch INTEGER NOT NULL
+                    );
+                    CREATE TABLE IF NOT EXISTS account_paid_orders (
+                        order_id TEXT PRIMARY KEY,
+                        user_id TEXT NOT NULL REFERENCES account_users(id) ON DELETE CASCADE,
+                        paid_at_epoch INTEGER NOT NULL,
+                        duration_days INTEGER NOT NULL
+                    );
                 """)
             if os.name != "nt":
                 self.path.chmod(0o600)
@@ -204,6 +220,54 @@ class SQLiteAccountRepository:
         with closing(self._connect()) as connection, connection:
             connection.execute("DELETE FROM account_sessions WHERE token_hash = ?", (token_hash,))
 
+    def membership_until(self, user_id: str) -> int | None:
+        self._ensure_schema()
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT valid_until_epoch FROM account_memberships WHERE user_id = ?", (user_id,),
+            ).fetchone()
+        return int(row[0]) if row else None
+
+    def apply_verified_payment(self, user_id: str, order_id: str,
+                               duration_days: int, paid_at: int) -> int:
+        """Call only after the merchant server has verified a paid order.
+
+        The unique order ID makes repeated provider notifications idempotent.
+        This method is deliberately not exposed as an unauthenticated API.
+        """
+        if not order_id or not 1 <= duration_days <= 3660:
+            raise ValueError('订单号或会员天数无效')
+        self._ensure_schema()
+        with closing(self._connect()) as connection, connection:
+            if connection.execute(
+                "SELECT 1 FROM account_users WHERE id = ?", (user_id,),
+            ).fetchone() is None:
+                raise ValueError('账户不存在')
+            inserted = connection.execute(
+                "INSERT OR IGNORE INTO account_paid_orders(order_id, user_id, paid_at_epoch, duration_days) "
+                "VALUES (?, ?, ?, ?)", (order_id, user_id, paid_at, duration_days),
+            ).rowcount
+            current = connection.execute(
+                "SELECT valid_until_epoch FROM account_memberships WHERE user_id = ?", (user_id,),
+            ).fetchone()
+            if inserted:
+                expires = max(int(current[0]) if current else 0, paid_at) + duration_days * 86400
+                connection.execute(
+                    "INSERT INTO account_memberships(user_id, valid_until_epoch, updated_at_epoch) "
+                    "VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET "
+                    "valid_until_epoch=excluded.valid_until_epoch, updated_at_epoch=excluded.updated_at_epoch",
+                    (user_id, expires, paid_at),
+                )
+            else:
+                # Do not let a duplicate order grant days to another account.
+                original = connection.execute(
+                    "SELECT user_id FROM account_paid_orders WHERE order_id = ?", (order_id,),
+                ).fetchone()
+                if original is None or original[0] != user_id:
+                    raise ValueError('订单号已被其他账户使用')
+                expires = int(current[0]) if current else 0
+        return expires
+
 
 class AccountService:
     def __init__(self, repository: AccountRepository):
@@ -213,12 +277,19 @@ class AccountService:
     def public_user(user: dict) -> dict:
         return {key: user[key] for key in ("id", "phone", "created_at", "phone_verified")}
 
+    def _profile(self, user: dict) -> dict:
+        profile = self.public_user(user)
+        expires = self.repository.membership_until(user['id'])
+        profile['member_until'] = datetime.fromtimestamp(expires, timezone.utc).isoformat() if expires else None
+        profile['is_member'] = bool(expires and expires > int(time.time()))
+        return profile
+
     def _new_session(self, user: dict) -> dict:
         token = secrets.token_urlsafe(32)
         now = int(time.time())
         self.repository.save_session(hashlib.sha256(token.encode("ascii")).hexdigest(), user["id"], now,
                                      now + SESSION_LIFETIME_SECONDS)
-        return {"token": token, "user": self.public_user(user)}
+        return {"token": token, "user": self._profile(user)}
 
     def register(self, phone: str, password: str) -> dict:
         user_id = str(uuid.uuid4())
@@ -242,7 +313,10 @@ class AccountService:
         user = self.repository.get_session_user(hashlib.sha256(token.encode("utf-8")).hexdigest(), int(time.time()))
         if user is None:
             raise InvalidSession
-        return {"user": self.public_user(user)}
+        return {"user": self._profile(user)}
+
+    def is_member(self, token: str) -> bool:
+        return bool(self.me(token)['user']['is_member'])
 
     def logout(self, token: str) -> None:
         self.repository.delete_session(hashlib.sha256(token.encode("utf-8")).hexdigest())

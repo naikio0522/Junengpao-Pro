@@ -97,9 +97,9 @@ app.whenReady().then(async () => {
     await evaluate('document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }))')
     assert.equal(await evaluate('document.querySelector("#overlap-rate-help")'), null)
     assert.equal(await evaluate(`(() => {
-      const panel = [...document.querySelectorAll('div')].find(node => node.className.includes('overflow-y-auto'))
       const output = [...document.querySelectorAll('h2')].find(node => node.textContent.trim() === '输出')
-      return Boolean(panel && output && output.getBoundingClientRect().bottom <= panel.getBoundingClientRect().bottom)
+      const panel = output?.closest('div[class*="overflow-y-auto"]')
+      return Boolean(panel && output && getComputedStyle(panel).overflowY === 'auto')
     })()`), true)
     await evaluate('[...document.querySelectorAll("label")].find(node => node.textContent.trim() === "按原素材时长").click()')
     await pause(600)

@@ -860,7 +860,8 @@ class VideoMatrixCore:
         self.rng.shuffle(self.hook_pool)
         return True, "预检通过"
 
-    def render_single_video(self, task_idx: int, return_result: bool = False):
+    def render_single_video(self, task_idx: int, return_result: bool = False,
+                            on_progress: Optional[Callable[[float], None]] = None):
         if not self.is_running:
             return (False, None, None) if return_result else False
 
@@ -1196,7 +1197,8 @@ class VideoMatrixCore:
         success, error = render_video(
             cmd, cfg.get('enable_gpu', True), out_path, self.temp_dir_path,
             config=cfg, log=self.log, is_cancelled=lambda: not self.is_running,
-            on_process=self._track_process,
+            on_process=self._track_process, on_progress=on_progress,
+            progress_duration=t_total,
         )
         if not success and self.is_running:
             from .hardware import short_error

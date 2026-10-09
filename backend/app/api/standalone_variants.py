@@ -10,11 +10,16 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Callable, Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
 from ..core.ffmpeg import probe_media
+from ..core.brand_watermark import apply_brand_watermark
 from ..core.video_variant import VideoVariantProcessor, derive_variant_seed
+from ..services.account_service import AccountService, InvalidSession
+from ..services.remote_account_service import AccountServiceUnavailable, RemoteAccountService
+from .accounts import bearer, get_account_service
 
 
 VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"})
@@ -153,7 +158,7 @@ class StandaloneVariantService:
         self.lock = threading.Lock()
         self.processor = VideoVariantProcessor()
 
-    def create(self, request: StandaloneVariantRequest) -> dict:
+    def create(self, request: StandaloneVariantRequest, *, is_member: bool = False) -> dict:
         raw_paths = [value.strip() for value in request.input_paths if value.strip()]
         if not raw_paths:
             raise ValueError("请选择视频或素材文件夹")
@@ -178,7 +183,7 @@ class StandaloneVariantService:
             self.jobs[task_id] = job
             self.events[task_id] = event
         worker = threading.Thread(
-            target=self._run, args=(task_id, inputs, output_dir, request, event),
+            target=self._run, args=(task_id, inputs, output_dir, request, event, is_member),
             daemon=True, name=f"standalone-variant-{task_id[:8]}",
         )
         worker.start()
@@ -229,7 +234,8 @@ class StandaloneVariantService:
         self._update(task_id, phase_detail=message)
 
     def _run(self, task_id: str, inputs: list[Path], output_dir: Path,
-             request: StandaloneVariantRequest, cancelled: threading.Event) -> None:
+             request: StandaloneVariantRequest, cancelled: threading.Event,
+             is_member: bool) -> None:
         self._update(task_id, status="running", message="正在准备输出目录")
         try:
             output_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +305,17 @@ class StandaloneVariantService:
                     )
                     if not ok:
                         raise RuntimeError(error or "去重变换失败")
+                    if not is_member:
+                        self._log_stage(task_id, "免费版：正在叠加半透明俊小白品牌水印。")
+                        branded, brand_error = apply_brand_watermark(
+                            str(destination), settings, is_cancelled=cancelled.is_set,
+                            on_progress=lambda fraction: self._set_file_progress(
+                                task_id, completed, total, 95 + fraction * 3,
+                                f"正在叠加品牌水印：{fraction * 100:.0f}%",
+                            ),
+                        )
+                        if not branded:
+                            raise RuntimeError(brand_error or "品牌水印叠加失败")
                     self._set_file_progress(task_id, completed, total, 98, "正在复核已生成的视频文件。")
                     if not destination.exists() or not probe_media(str(destination)):
                         raise RuntimeError("输出视频校验失败")
@@ -333,9 +350,19 @@ router = APIRouter()
 
 
 @router.post("/standalone-variants", status_code=201)
-def create_standalone_variant(request: StandaloneVariantRequest):
+def create_standalone_variant(
+    request: StandaloneVariantRequest,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    accounts: AccountService | RemoteAccountService = Depends(get_account_service),
+):
+    is_member = False
+    if credentials is not None:
+        try:
+            is_member = accounts.is_member(credentials.credentials)
+        except (InvalidSession, AccountServiceUnavailable):
+            pass
     try:
-        return standalone_variant_service.create(request)
+        return standalone_variant_service.create(request, is_member=is_member)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

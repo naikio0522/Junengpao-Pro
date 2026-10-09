@@ -391,6 +391,15 @@ ipcMain.handle('shell:openPath', async (_, filePath: string) => {
   await shell.openPath(filePath)
 })
 
+ipcMain.handle('shell:openExternalHttps', async (_, rawUrl: string) => {
+  if (typeof rawUrl !== 'string' || rawUrl.length > 4096) throw new Error('付款地址无效')
+  const url = new URL(rawUrl)
+  if (url.protocol !== 'https:' || !url.hostname || url.username || url.password) {
+    throw new Error('只允许打开 HTTPS 付款页面')
+  }
+  await shell.openExternal(url.toString())
+})
+
 ipcMain.handle('app:getBackendPort', () => backendPort)
 ipcMain.handle('app:checkForUpdates', () => checkForUpdate())
 ipcMain.handle('app:downloadAndInstallUpdate', async () => {

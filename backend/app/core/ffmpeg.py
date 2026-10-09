@@ -4,6 +4,7 @@ import json
 import subprocess
 import tempfile
 import re
+import threading
 import time
 from typing import Optional, Tuple, List
 
@@ -250,15 +251,45 @@ def build_filter_complex(
     return filter_complex.strip('; '), current_v, audio_map
 
 
-def run_process(command, is_cancelled=None, on_process=None, timeout=None, cwd=None):
+def run_process(command, is_cancelled=None, on_process=None, timeout=None, cwd=None,
+                progress_callback=None, progress_duration=None):
     """Drain stderr without a pipe deadlock; cancellation also applies to base renders."""
     started = time.monotonic()
+    track_progress = progress_callback is not None and progress_duration is not None and progress_duration > 0
+    if track_progress:
+        # FFmpeg writes progress key/value lines to stdout. Drain that pipe on
+        # a separate thread while the parent continues polling cancellation.
+        command = [command[0], '-progress', 'pipe:1', *command[1:]]
     try:
         with tempfile.TemporaryFile() as errors:
             process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=errors, cwd=cwd,
+                command, stdout=subprocess.PIPE if track_progress else subprocess.DEVNULL,
+                stderr=errors, cwd=cwd,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
             )
+            reader = None
+            if track_progress:
+                def read_progress():
+                    last_fraction = 0.0
+                    assert process.stdout is not None
+                    for raw in process.stdout:
+                        line = raw.decode('utf-8', 'replace').strip()
+                        if not line.startswith(('out_time_us=', 'out_time_ms=')):
+                            continue
+                        try:
+                            # FFmpeg's out_time_ms unit is microseconds too.
+                            seconds = max(0, int(line.split('=', 1)[1])) / 1_000_000
+                        except ValueError:
+                            continue
+                        fraction = min(0.98, seconds / progress_duration)
+                        if fraction > last_fraction:
+                            last_fraction = fraction
+                            try:
+                                progress_callback(fraction)
+                            except Exception:
+                                pass  # UI status updates must never abort rendering.
+                reader = threading.Thread(target=read_progress, daemon=True)
+                reader.start()
             if on_process:
                 on_process(process)
             try:
@@ -282,6 +313,10 @@ def run_process(command, is_cancelled=None, on_process=None, timeout=None, cwd=N
                 detail = errors.read().decode('utf-8', errors='replace')
                 return process.returncode == 0, detail or None
             finally:
+                if reader:
+                    reader.join(timeout=2)
+                    if process.stdout:
+                        process.stdout.close()
                 if on_process:
                     on_process(None)
     except OSError as exc:
@@ -297,6 +332,8 @@ def render_video(
     log=None,
     is_cancelled=None,
     on_process=None,
+    on_progress=None,
+    progress_duration=None,
 ) -> Tuple[bool, Optional[str]]:
     """
     执行 FFmpeg 渲染。
@@ -306,5 +343,7 @@ def render_video(
     runtime = config if config is not None else {'enable_gpu': enable_gpu}
     return session_for(runtime, log).run(
         cmd_base, [output_path], '混剪', is_cancelled, on_process,
-        runner=lambda command: run_process(command, is_cancelled, on_process, cwd=temp_dir),
+        runner=lambda command: run_process(
+            command, is_cancelled, on_process, cwd=temp_dir,
+            progress_callback=on_progress, progress_duration=progress_duration),
     )

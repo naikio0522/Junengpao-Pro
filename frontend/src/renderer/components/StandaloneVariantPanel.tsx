@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent } from 'react'
+import { ACCOUNT_TOKEN_KEY } from '../api/client'
 
 type Strength = 'mild' | 'balanced' | 'strong'
 type JobStatus = 'pending' | 'running' | 'completed' | 'failed' | 'stopped'
@@ -39,7 +40,13 @@ async function variantRequest<T>(path: string, options?: RequestInit): Promise<T
   const port = await window.electronAPI.getBackendPort()
   const response = await fetch(`http://127.0.0.1:${port}/api${path}`, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(sessionStorage.getItem(ACCOUNT_TOKEN_KEY)
+        ? { Authorization: `Bearer ${sessionStorage.getItem(ACCOUNT_TOKEN_KEY)}` }
+        : {}),
+      ...options?.headers,
+    },
   })
   if (!response.ok) {
     let detail = `请求失败（HTTP ${response.status}）`

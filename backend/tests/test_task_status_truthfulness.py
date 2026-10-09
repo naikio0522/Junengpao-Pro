@@ -16,7 +16,9 @@ class _ReadyCore:
         self.task_name = config['task_name']
         self.temp_dir = tempfile.TemporaryDirectory()
 
-    def pre_flight_check(self):
+    def pre_flight_check(self, progress_callback=None):
+        if progress_callback:
+            progress_callback('probe', 1, 1)
         return True, '预检通过'
 
 
@@ -35,7 +37,7 @@ class TaskStatusTruthfulnessTests(unittest.TestCase):
             with patch.object(service, '_get_tasks_from_config', return_value=task_specs), \
                     patch('app.services.task_service.VideoMatrixCore', _ReadyCore), \
                     patch('app.services.task_service.HardwareSession', return_value=object()), \
-                    patch.object(service, '_render_job', side_effect=lambda _core, idx, _status: results[idx - 1]):
+                    patch.object(service, '_render_job', side_effect=lambda _core, idx, _status, _progress: results[idx - 1]):
                 service._run_pipeline(task_id, {'task_name': 'sample', 'target_count': len(results),
                                                 'concurrent_tasks': 1})
             return service.tasks[task_id], service.log_buffers[task_id]

@@ -12,6 +12,7 @@ import { SponsorMe } from './SponsorMe'
 import { AccountEntry } from './AccountEntry'
 import { CheckUpdatesButton } from './CheckUpdatesButton'
 import { StandaloneVariantPanel } from './StandaloneVariantPanel'
+import { WatermarkRemovalPanel } from './WatermarkRemovalPanel'
 import { WorkflowSegmentedControl, type WorkflowMode } from './WorkflowSegmentedControl'
 
 const RESOLUTION_PRESETS = [
@@ -364,11 +365,13 @@ function TaskRow({ task }: { task: TaskStatus }) {
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
 export default function SinglePage() {
-  const { config, setConfig, tasks, logs, appendLog, clearLogs, addToast, scannedFiles } = useStore()
+  const { config, setConfig, tasks, currentTaskId, setCurrentTaskId, logs, appendLog, clearLogs, addToast, scannedFiles } = useStore()
   const [isRunning, setIsRunning] = useState(false)
+  const [renderTerminalNotice, setRenderTerminalNotice] = useState<string | null>(null)
   const [rightTab, setRightTab] = useState<'log' | 'speech' | 'tasks' | 'output' | 'variant'>('log')
   const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('vm-theme') as 'dark' | 'light') || 'dark')
   const [benchmarkRunning, setBenchmarkRunning] = useState(false)
+  const [subtitleBusyPath, setSubtitleBusyPath] = useState<string | null>(null)
   const [benchmarkProgress, setBenchmarkProgress] = useState(0)
   const [preflightRunning, setPreflightRunning] = useState(false)
   const [preflightProgress, setPreflightProgress] = useState<{ percent: number; message: string } | null>(null)
@@ -528,6 +531,20 @@ export default function SinglePage() {
   }, [tasks, addToast, appendLog])
 
   const running = tasks.filter(t => t.status === 'running').length
+  const renderTask = tasks.find(task => task.task_id === currentTaskId)
+  const renderTaskStatus = renderTask?.status
+  const renderTaskActive = renderTaskStatus === 'pending' || renderTaskStatus === 'running'
+  const renderProgressVisible = isRunning || renderTaskActive || renderTerminalNotice !== null
+  const renderProgress = isRunning ? 0 : Math.max(0, Math.min(100, renderTask?.progress ?? 0))
+  const renderButtonText = isRunning ? '启动中…'
+    : renderTaskActive ? renderTaskStatus === 'pending' ? '等待渲染' : '渲染中'
+    : renderTerminalNotice ?? '启动渲染'
+  useEffect(() => {
+    if (!renderTaskStatus || !['completed', 'failed', 'stopped'].includes(renderTaskStatus)) return
+    setRenderTerminalNotice(renderTaskStatus === 'completed' ? '渲染完成' : renderTaskStatus === 'failed' ? '渲染失败，可重试' : '渲染已停止')
+    const timer = window.setTimeout(() => setRenderTerminalNotice(null), 2500)
+    return () => window.clearTimeout(timer)
+  }, [currentTaskId, renderTaskStatus])
   const subtitleYPercent = Math.max(8, Math.min(92, Number(config.subtitle_y_percent) || 92))
   const subtitleFontSizePercent = Math.max(3, Math.min(9, Number(config.subtitle_font_size_percent) || 5.6))
   const enabledBodyGroups = config.body_groups.filter((group) => group.enabled)
@@ -722,12 +739,41 @@ export default function SinglePage() {
     }
   }
 
+  const exportSubtitleForVideo = async (videoPath?: string) => {
+    if (subtitleBusyPath) return
+    let selected = videoPath
+    if (!selected) {
+      if (!window.electronAPI) { addToast('请在桌面版中选择成片', 'warning'); return }
+      selected = await window.electronAPI.openFile(
+        [{ name: '成片视频', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }],
+        browseStartDirectory('subtitle_export', config.base_out_dir),
+      ) || undefined
+      if (!selected) return
+      rememberBrowseDirectory('subtitle_export', selected, true)
+    }
+    setSubtitleBusyPath(selected)
+    try {
+      const result = await api.exportSubtitleSrt(selected)
+      appendLog(`${result.status === 'existing' ? '字幕已存在' : '字幕已生成'}：${result.srt_path}（${result.cue_count} 条）`)
+      if (window.electronAPI) await window.electronAPI.openPath(result.folder)
+      addToast(result.status === 'existing' ? '已有同名 SRT，已打开所在文件夹' : 'SRT 已生成并打开文件夹，可在剪映中导入', 'success')
+    } catch (error: any) {
+      const message = error?.message || '生成 SRT 失败'
+      appendLog(`[字幕导出失败] ${message}`)
+      addToast(message, 'error')
+    } finally {
+      setSubtitleBusyPath(null)
+    }
+  }
+
   const startRender = async () => {
     const runConfig = ensureRunConfig()
     if (!runConfig) return
+    setRenderTerminalNotice(null)
     setIsRunning(true)
     try {
       const res = await api.createTask(runConfig)
+      setCurrentTaskId(res.task_id)
       addToast('任务已启动', 'success')
       appendLog(`▸ ${new Date().toLocaleTimeString()} 任务 ${res.task_id} 已派发`)
     } catch (e: any) {
@@ -780,33 +826,38 @@ export default function SinglePage() {
     if (!runConfig || benchmarkRunning) return
 
     setBenchmarkRunning(true)
-    setBenchmarkProgress(1)
-    appendLog('>>> [压测] 正在测试 1%')
+    setBenchmarkProgress(0)
+    appendLog('>>> [压测] 正在准备素材，百分比按实际完成的检查与成片计算')
     addToast('智能压测已开始', 'info')
 
-    const timer = window.setInterval(() => {
-      setBenchmarkProgress((p) => {
-        const next = Math.min(95, p + 7)
-        if (next % 14 === 0 || next === 95) appendLog(`>>> [压测] 正在测试 ${next}%`)
-        return next
-      })
-    }, 900)
-
     try {
-      const res = await api.benchmark(runConfig)
-      if (res.error) { addToast(res.error, 'error'); return }
+      let lastLogged = ''
+      const res = await api.benchmark(runConfig, (percent, message) => {
+        setBenchmarkProgress(percent)
+        // Heartbeats keep the connection visibly alive, but must not flood logs.
+        if (!message.includes('（已用 ') && `${percent}:${message}` !== lastLogged) {
+          lastLogged = `${percent}:${message}`
+          appendLog(`>>> [压测] ${percent}% · ${message}`)
+        }
+      })
+      if (res.error) {
+        appendLog(`[压测失败] ${res.error}`)
+        addToast(res.error, 'error')
+        return
+      }
       setBenchmarkProgress(100)
       appendLog('>>> [压测] 智能压测完成')
       Object.values(res.results || {}).forEach((item: any) => {
         appendLog(`    - ${item.concurrent} 路并发总耗时: ${item.total_time} 秒，单视频平均: ${item.avg_per_video} 秒`)
       })
+      for (const warning of res.warnings || []) appendLog(`    [压测提示] ${warning}`)
       appendLog(`✅ [压测完成] 最优节点为 ${res.best_concurrent} 路并发`)
       setConfig({ concurrent_tasks: res.best_concurrent })
       addToast(`最优并发 ${res.best_concurrent} 路`, 'success')
     } catch (e: any) {
-      addToast(e.message, 'error')
+      appendLog(`[压测失败] ${e?.message || '请求中断'}`)
+      addToast(e?.message || '压测失败', 'error')
     } finally {
-      window.clearInterval(timer)
       window.setTimeout(() => {
         setBenchmarkRunning(false)
         setBenchmarkProgress(0)
@@ -852,7 +903,7 @@ export default function SinglePage() {
         {/* Header */}
         <div className="vm-topbar flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 rounded-[18px] px-4 py-2.5 mb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.5</span></h1>
+            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.6</span></h1>
             <FeatureHelp tutorial />
             <ContactMe />
             <SponsorMe />
@@ -910,8 +961,9 @@ export default function SinglePage() {
         <div className="vm-workflow-stage min-h-0 min-w-0 flex-1" style={{ '--vm-slide-direction': slideDirection } as React.CSSProperties}>
           <div data-testid="workflow-pane-dedup" aria-hidden={workflow !== 'dedup'}
             className={`vm-workflow-pane ${workflow === 'dedup' ? 'is-active' : ''}`}>
-            <div className="min-h-0 min-w-0 flex-1 overflow-y-auto pr-1">
-            <StandaloneVariantPanel onLog={appendLog} />
+            <div className="min-h-0 min-w-0 flex-1 space-y-3 overflow-y-auto pr-1">
+              <StandaloneVariantPanel onLog={appendLog} />
+              <WatermarkRemovalPanel onLog={appendLog} />
             </div>
           </div>
           <div data-testid="workflow-pane-mix" aria-hidden={workflow !== 'mix'}
@@ -1004,6 +1056,14 @@ export default function SinglePage() {
                   }}
                   bodyOnly={!config.apply_srt_to_hook} onBodyOnlyChange={(v) => setConfig({ apply_srt_to_hook: !v })}
                   onBrowse={() => browse('srt_dir')}         onClear={() => setConfig({ srt_dir: '', enable_srt: false })} />
+                <div className="flex items-center justify-between gap-2 rounded-[5px] border border-border/[0.08] bg-foreground/[0.015] px-2.5 py-1.5">
+                  <span className="text-[10px] leading-4 text-muted-foreground">成片转字幕：离线识别并保存同名 SRT，剪映中导入即可；已有 SRT 会保留。</span>
+                  <button type="button" disabled={subtitleBusyPath !== null}
+                    onClick={() => void exportSubtitleForVideo()}
+                    className="shrink-0 rounded-[4px] border border-accent/45 px-2 py-1 text-[10px] font-semibold text-accent hover:bg-accent/10 disabled:cursor-wait disabled:opacity-50">
+                    {subtitleBusyPath ? '离线识别中…' : '选择成片生成 SRT'}
+                  </button>
+                </div>
                 {config.enable_srt && (
                   <div className="space-y-1 rounded-[5px] border border-accent/20 bg-accent/[0.035] px-2.5 py-1">
                     <div className="flex h-7 items-center gap-2">
@@ -1165,23 +1225,26 @@ export default function SinglePage() {
               <div className="flex flex-col items-stretch justify-center gap-1.5 border-l border-border/[0.14] pl-3">
                 <span className="text-center text-[10px] text-muted-foreground">操作<FeatureHelp topic="actions" title="操作按钮" /></span>
                 <div className="space-y-1.5">
-                  <button type="button" onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary h-9 w-full px-2 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
-                    {preflightRunning ? `预检中 ${preflightProgress?.percent ?? 0}%` : '预检产能'}
+                  <button type="button" aria-label="预检产能" title={preflightProgress?.message} onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary relative h-9 w-full overflow-hidden px-2 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
+                    {preflightProgress && <span role="progressbar" aria-label="预检产能进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress.percent} aria-valuetext={preflightProgress.message} className="pointer-events-none absolute inset-0">
+                      <span className="absolute inset-y-0 left-0 bg-accent/20 transition-[width] duration-300" style={{ width: `${preflightProgress.percent}%` }} />
+                      <span className="absolute inset-x-0 bottom-0 h-[3px] bg-foreground/[0.08]">
+                        <span className="block h-full bg-accent transition-[width] duration-300" style={{ width: `${preflightProgress.percent}%` }} />
+                      </span>
+                    </span>}
+                    <span className="relative z-10">{preflightRunning ? '预检中' : preflightProgress?.message === '预检失败' ? '预检失败' : '预检产能'}</span>
+                    {preflightProgress && <span className="relative z-10 ml-1 font-mono tabular-nums">{preflightProgress.percent}%</span>}
                   </button>
-                  {preflightProgress && (
-                    <div role="progressbar" aria-label="预检产能进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress.percent} className="min-w-0" title={preflightProgress.message}>
-                      <div className="mb-0.5 flex items-center justify-between gap-1 text-[9px] text-muted-foreground">
-                        <span className="min-w-0 truncate">{preflightProgress.message}</span>
-                        <span className="shrink-0 font-mono tabular-nums">{preflightProgress.percent}%</span>
-                      </div>
-                      <div className="h-1.5 overflow-hidden rounded-full bg-foreground/[0.10]">
-                        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${preflightProgress.percent}%` }} />
-                      </div>
-                    </div>
-                  )}
                 </div>
-                <button type="button" onClick={startRender} disabled={isRunning} className="vm-action-primary h-10 bg-accent px-2 text-[12px] font-bold text-background hover:bg-accent-hover disabled:opacity-50">
-                  {isRunning ? '启动中…' : '启动渲染'}
+                <button type="button" aria-label="启动渲染" onClick={startRender} disabled={isRunning} className="vm-action-primary relative h-10 overflow-hidden bg-accent px-2 text-[12px] font-bold text-background hover:bg-accent-hover disabled:opacity-50">
+                  {renderProgressVisible && <span role="progressbar" aria-label="启动渲染进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={renderProgress} className="pointer-events-none absolute inset-0">
+                    <span className={`absolute inset-y-0 left-0 transition-[width] duration-500 ${renderTerminalNotice?.includes('失败') ? 'bg-hot/30' : 'bg-background/20'}`} style={{ width: `${renderProgress}%` }} />
+                    <span className="absolute inset-x-0 bottom-0 h-[3px] bg-background/20">
+                      <span className="block h-full bg-background/70 transition-[width] duration-500" style={{ width: `${renderProgress}%` }} />
+                    </span>
+                  </span>}
+                  <span className="relative z-10">{renderButtonText}</span>
+                  {renderProgressVisible && <span className="relative z-10 ml-1 font-mono tabular-nums">{renderProgress}%</span>}
                 </button>
                 <button type="button" onClick={clearHistory} className="vm-action-secondary h-8 px-2 text-[11px]">
                   清除记录
@@ -1261,7 +1324,7 @@ export default function SinglePage() {
                 ...(config.selection_mode === 'speech_logic' ? [{ k: 'speech' as const, label: '口播预览', count: visibleSpeechPreviews.length }] : []),
                 { k: 'tasks',  label: '任务', count: tasks.length },
                 { k: 'output', label: '产出', count: allOutputItems.length },
-                { k: 'variant', label: '渲染设置', count: (config.enable_variants || (config.selection_mode === 'speech_logic' && config.no_fallback_mix)) ? 'ON' : 'OFF' },
+                { k: 'variant', label: '渲染设置', count: null },
               ] as const).map(t => (
                 <button
                   key={t.k}
@@ -1271,7 +1334,7 @@ export default function SinglePage() {
                   }`}
                 >
                   {t.label}
-                  <span className="ml-1.5 font-mono opacity-70 tabular-nums">{t.count}</span>
+                  {t.count !== null && <span className="ml-1.5 font-mono opacity-70 tabular-nums">{t.count}</span>}
                   {rightTab === t.k && <span className="absolute left-3 right-3 -bottom-px h-px bg-accent" />}
                 </button>
               ))}
@@ -1371,6 +1434,11 @@ export default function SinglePage() {
                             {elapsed}s
                           </span>
                         )}
+                        <button type="button" disabled={subtitleBusyPath !== null}
+                          onClick={() => void exportSubtitleForVideo(f)}
+                          className="text-[10px] text-accent hover:underline disabled:cursor-wait disabled:opacity-50 px-1.5">
+                          {subtitleBusyPath === f ? '识别中…' : '生成 SRT'}
+                        </button>
                         <button
                           onClick={() => window.electronAPI?.openPath(f)}
                           className="text-[10px] text-muted-foreground hover:text-accent transition-colors px-1.5"

@@ -29,6 +29,7 @@ FONT_ASSET_DIR = BACKEND_DIR / 'assets' / 'fonts'
 FONT_FILE = FONT_ASSET_DIR / 'files' / 'SourceHanSansSC-Regular.otf'
 FONT_LICENSE = FONT_ASSET_DIR / 'SourceHanSans-LICENSE.txt'
 FONT_README = FONT_ASSET_DIR / 'README.md'
+BRAND_WATERMARK = BACKEND_DIR / 'assets' / 'brand' / 'junxiaobai-watermark.png'
 
 # Collect ffmpeg / ffprobe regardless of which platform we are building on.
 # Each entry is (source_path_on_disk, target_subdir_inside_bundle).
@@ -44,6 +45,9 @@ datas = []
 datas += collect_data_files('faster_whisper', includes=['assets/*.onnx'])
 if FONT_FILE.exists():
     datas.append((str(FONT_FILE), 'fonts'))
+if not BRAND_WATERMARK.is_file():
+    raise RuntimeError('The required free-tier brand watermark is missing')
+datas.append((str(BRAND_WATERMARK), 'brand'))
 for notice in (FONT_LICENSE, FONT_README):
     if notice.exists():
         datas.append((str(notice), 'licenses/source-han-sans'))
@@ -96,6 +100,9 @@ hiddenimports = [
     'aiofiles',
     'app.api.routes',
     'app.api.accounts',
+    'app.api.billing',
+    'app.api.subtitles',
+    'app.api.watermark_removal',
     'app.api.standalone_variants',
     'app.core.ffmpeg',
     'app.core.video_matrix',
@@ -107,8 +114,11 @@ hiddenimports = [
     'app.core.video_variant',
     'app.core.timeline',
     'app.core.video_cover',
+    'app.core.brand_watermark',
+    'app.core.watermark_removal',
     'app.services.task_service',
     'app.services.account_service',
+    'app.services.remote_account_service',
     'app.models.schemas',
 ]
 

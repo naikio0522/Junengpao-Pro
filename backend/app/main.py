@@ -11,6 +11,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api.routes import router
 from .api.accounts import router as account_router
 from .api.standalone_variants import router as standalone_variant_router, standalone_variant_service
+from .api.subtitles import router as subtitle_router
+from .api.billing import router as billing_router
+from .api.watermark_removal import router as watermark_removal_router, watermark_removal_service
 
 # 确保工作目录正确，以便找到 ffmpeg
 if getattr(sys, 'frozen', False):
@@ -19,7 +22,7 @@ if getattr(sys, 'frozen', False):
 app = FastAPI(
     title="巨能跑pro版 API",
     description="巨能跑pro版短视频矩阵自动化混剪后端 API",
-    version="0.1.5"
+    version="0.1.6"
 )
 
 app.add_middleware(
@@ -33,6 +36,9 @@ app.add_middleware(
 app.include_router(router, prefix="/api")
 app.include_router(account_router, prefix="/api")
 app.include_router(standalone_variant_router, prefix="/api")
+app.include_router(subtitle_router, prefix="/api")
+app.include_router(billing_router, prefix="/api")
+app.include_router(watermark_removal_router, prefix="/api")
 
 
 @app.get("/api/health")
@@ -99,6 +105,7 @@ def main() -> None:
                 from .services.task_service import task_service
                 task_service.stop_all_tasks()
                 standalone_variant_service.stop_all()
+                watermark_removal_service.stop_all()
                 server.should_exit = True
 
         threading.Thread(target=watch_parent, daemon=True).start()
@@ -106,6 +113,7 @@ def main() -> None:
         server.run(sockets=[listener])
     finally:
         standalone_variant_service.stop_all()
+        watermark_removal_service.stop_all()
         listener.close()
 
 

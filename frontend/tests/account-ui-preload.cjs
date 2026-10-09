@@ -23,6 +23,9 @@ function reply(data, status = 200) {
 
 window.fetch = async (url, options = {}) => {
   const path = String(url)
+  if (path.endsWith('/api/account/mode')) {
+    return reply({ mode: sessionStorage.getItem('__test_account_mode') || 'local_test' })
+  }
   if (path.endsWith('/api/account/register') || path.endsWith('/api/account/login')) {
     const body = JSON.parse(options.body)
     window.__accountCalls.push({
@@ -36,6 +39,8 @@ window.fetch = async (url, options = {}) => {
   }
   if (path.endsWith('/api/account/me')) {
     window.__accountCalls.push({ path, bearer: options.headers?.Authorization })
+    const forcedStatus = Number(sessionStorage.getItem('__test_account_me_status') || 0)
+    if (forcedStatus) return reply({ detail: forcedStatus === 401 ? '登录已失效' : '云端账号服务暂不可用' }, forcedStatus)
     return options.headers?.Authorization === `Bearer ${token}`
       ? reply({ user }) : reply({ detail: '请先登录' }, 401)
   }

@@ -6,6 +6,7 @@ export interface ElectronAPI {
   openVideoFiles: (defaultPath?: string, extensions?: string[]) => Promise<string[] | null>
   saveTextFile: (defaultName: string, content: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>
   openPath: (filePath: string) => Promise<void>
+  openExternalHttps: (url: string) => Promise<void>
   getBackendPort: () => Promise<number>
   checkForUpdates: () => Promise<UpdateCheckResult>
   downloadAndInstallUpdate: () => Promise<'canceled' | 'installer-launched' | 'dmg-opened'>
@@ -30,6 +31,7 @@ const api: ElectronAPI = {
   openVideoFiles: (defaultPath, extensions) => ipcRenderer.invoke('dialog:openVideoFiles', defaultPath, extensions),
   saveTextFile: (defaultName, content, filters) => ipcRenderer.invoke('dialog:saveText', defaultName, content, filters),
   openPath: (filePath) => ipcRenderer.invoke('shell:openPath', filePath),
+  openExternalHttps: (url) => ipcRenderer.invoke('shell:openExternalHttps', url),
   getBackendPort: () => ipcRenderer.invoke('app:getBackendPort'),
   checkForUpdates: () => ipcRenderer.invoke('app:checkForUpdates'),
   downloadAndInstallUpdate: () => ipcRenderer.invoke('app:downloadAndInstallUpdate'),

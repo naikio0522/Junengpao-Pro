@@ -42,8 +42,18 @@ app.whenReady().then(async () => {
     }
   })()`)
   const expectMode = async index => {
-    await pause(350)
-    const state = await inspect()
+    let state
+    for (let retry = 0; retry < 50; retry++) {
+      state = await inspect()
+      const button = state.buttonRects[index]
+      const thumb = state.thumbRect
+      const centered = Math.abs((thumb.left + thumb.right) / 2 - (button.left + button.right) / 2) < 4
+        && Math.abs(thumb.width - button.width) < 4
+      if (state.pressed[index] === 'true' && centered
+          && state.mix.visible === (index === 2 ? 'hidden' : 'visible')
+          && state.dedup.visible === (index === 2 ? 'visible' : 'hidden')) break
+      await pause(80)
+    }
     assert.deepEqual(state.labels, labels)
     assert.deepEqual(state.pressed, labels.map((_, position) => position === index ? 'true' : 'false'),
       `exactly one workflow active: ${JSON.stringify(state.pressed)}`)

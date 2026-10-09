@@ -1,5 +1,6 @@
 import os
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.responses import StreamingResponse
 import asyncio
 import json
@@ -12,13 +13,26 @@ from ..models.schemas import (
 from ..services.task_service import task_service
 from ..core.ffmpeg import probe_media, extract_media_info, extract_audio_duration
 from .standalone_variants import standalone_variant_service
+from .accounts import bearer, get_account_service
+from ..services.account_service import AccountService, InvalidSession
+from ..services.remote_account_service import AccountServiceUnavailable, RemoteAccountService
 
 router = APIRouter()
 
 
 @router.post("/tasks", response_model=CreateTaskResponse)
-def create_task(req: CreateTaskRequest):
-    task_id = task_service.create_task(req.config)
+def create_task(
+    req: CreateTaskRequest,
+    credentials: HTTPAuthorizationCredentials | None = Depends(bearer),
+    accounts: AccountService | RemoteAccountService = Depends(get_account_service),
+):
+    is_member = False
+    if credentials is not None:
+        try:
+            is_member = accounts.is_member(credentials.credentials)
+        except (InvalidSession, AccountServiceUnavailable):
+            pass
+    task_id = task_service.create_task(req.config, is_member=is_member)
     return CreateTaskResponse(task_id=task_id, message="任务已创建")
 
 
@@ -132,8 +146,53 @@ def probe_file(file_path: str):
 
 
 @router.post("/benchmark")
-def benchmark(config: VideoConfig):
-    return task_service.get_benchmark(config)
+async def benchmark(config: VideoConfig, request: Request):
+    # Keep JSON for older clients; the desktop app opts in to real progress.
+    if 'text/event-stream' not in request.headers.get('accept', ''):
+        return await asyncio.to_thread(task_service.get_benchmark, config)
+
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict] = asyncio.Queue()
+
+    def emit(event: dict):
+        loop.call_soon_threadsafe(events.put_nowait, event)
+
+    def run_benchmark():
+        try:
+            result = task_service.get_benchmark(
+                config,
+                progress_callback=lambda percent, message: emit({
+                    'type': 'progress', 'percent': percent, 'message': message,
+                }),
+            )
+            emit({'type': 'result', 'result': result})
+        except Exception as exc:
+            emit({'type': 'error', 'message': str(exc)})
+
+    async def event_generator():
+        threading.Thread(target=run_benchmark, daemon=True).start()
+        started = loop.time()
+        latest_percent = 0
+        latest_message = '准备压测素材'
+        while True:
+            try:
+                event = await asyncio.wait_for(events.get(), timeout=3)
+            except asyncio.TimeoutError:
+                # A long encode must look active, without inventing percent.
+                elapsed = int(loop.time() - started)
+                event = {'type': 'progress', 'percent': latest_percent,
+                         'message': f'{latest_message}（已用 {elapsed} 秒）'}
+            if event['type'] == 'progress':
+                latest_percent = event['percent']
+                latest_message = event['message'].split('（已用 ', 1)[0]
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if event['type'] in ('result', 'error'):
+                break
+
+    return StreamingResponse(
+        event_generator(), media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 
 @router.post("/preflight")

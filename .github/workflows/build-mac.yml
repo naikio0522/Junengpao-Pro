@@ -160,13 +160,13 @@ jobs:
           tag="$RELEASE_TAG"
           # A draft release is not addressable by tag through the release API.
           # Windows creates the public release with its installer; wait for it.
-          for attempt in {1..80}; do
+          for attempt in {1..160}; do
             if published=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" \
               --jq '(.draft == false and .prerelease == false)' 2>/dev/null); then
               if [[ "$published" == true ]]; then break; fi
             fi
-            if [[ "$attempt" == 80 ]]; then
-              echo "Windows did not publish $tag within 20 minutes." >&2
+            if [[ "$attempt" == 160 ]]; then
+              echo "Windows did not publish $tag within 40 minutes." >&2
               exit 1
             fi
             sleep 15

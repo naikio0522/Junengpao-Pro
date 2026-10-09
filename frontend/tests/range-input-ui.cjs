@@ -28,7 +28,7 @@ app.whenReady().then(async () => {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   })()`)
   const click = async label => evaluate(`(() => {
-    const button = [...document.querySelectorAll('button')].find(node => node.textContent.trim() === ${JSON.stringify(label)});
+    const button = [...document.querySelectorAll('button')].find(node => node.getAttribute('aria-label') === ${JSON.stringify(label)} || node.textContent.trim() === ${JSON.stringify(label)});
     if (!button) throw new Error('Missing button: ' + ${JSON.stringify(label)});
     button.click();
   })()`)
@@ -63,7 +63,7 @@ app.whenReady().then(async () => {
 
     assert.equal(await evaluate(`(() => {
       const card = document.querySelector('input[aria-label="Hook 首段"]').parentElement;
-      return ['文件夹', '视频'].every(label => [...card.querySelectorAll('button')].some(button => button.textContent.trim() === label));
+      return ['文件夹', '视频（可多选）'].every(label => [...card.querySelectorAll('button')].some(button => button.textContent.trim() === label));
     })()`), true)
     await evaluate(`(() => {
       const card = document.querySelector('input[aria-label="Hook 首段"]').parentElement;
@@ -73,7 +73,7 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate(`document.querySelector('input[aria-label="Hook 首段"]').value`), 'C:\\clips\\hook-folder')
     await evaluate(`(() => {
       const card = document.querySelector('input[aria-label="Hook 首段"]').parentElement;
-      [...card.querySelectorAll('button')].find(button => button.textContent.trim() === '视频').click();
+      [...card.querySelectorAll('button')].find(button => button.textContent.trim() === '视频（可多选）').click();
     })()`)
     await pause()
     assert.equal(await evaluate(`document.querySelector('input[aria-label="Hook 首段"]').value`), 'C:\\clips\\single-hook.mp4')
