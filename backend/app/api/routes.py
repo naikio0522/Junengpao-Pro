@@ -1,8 +1,9 @@
 import os
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 import asyncio
 import json
+import threading
 
 from ..models.schemas import (
     CreateTaskRequest, CreateTaskResponse, StopTaskRequest,
@@ -89,16 +90,24 @@ async def stream_logs(task_id: str):
 
 @router.post("/scan", response_model=ScanResponse)
 def scan_directory(req: ScanRequest):
-    if not os.path.exists(req.dir_path):
-        raise HTTPException(status_code=400, detail="目录不存在")
+    paths = [part.strip() for part in req.dir_path.split(';') if part.strip()]
+    if not paths or any(not os.path.exists(path) for path in paths):
+        raise HTTPException(status_code=400, detail="素材路径不存在")
+    extensions = tuple(ext.lower() for ext in req.extensions)
     files = []
-    if os.path.isfile(req.dir_path):
-        files = [req.dir_path] if any(req.dir_path.lower().endswith(ext.lower()) for ext in req.extensions) else []
-        return ScanResponse(files=files, count=len(files))
-    for root, _, filenames in os.walk(req.dir_path):
-        for f in filenames:
-            if any(f.lower().endswith(ext) for ext in req.extensions):
-                files.append(os.path.join(root, f))
+    seen = set()
+    for path in paths:
+        if os.path.isfile(path):
+            candidates = [path] if path.lower().endswith(extensions) else []
+        else:
+            candidates = (os.path.join(root, name)
+                          for root, _, filenames in os.walk(path)
+                          for name in filenames if name.lower().endswith(extensions))
+        for file_path in candidates:
+            key = os.path.normcase(os.path.abspath(file_path))
+            if key not in seen:
+                seen.add(key)
+                files.append(file_path)
     return ScanResponse(files=files, count=len(files))
 
 
@@ -128,8 +137,42 @@ def benchmark(config: VideoConfig):
 
 
 @router.post("/preflight")
-def preflight(config: VideoConfig):
-    return task_service.preflight(config)
+async def preflight(config: VideoConfig, request: Request):
+    # Keep the JSON contract for existing clients. The desktop UI opts in to
+    # streaming so it can display real completed-work progress during offline ASR.
+    if 'text/event-stream' not in request.headers.get('accept', ''):
+        return await asyncio.to_thread(task_service.preflight, config)
+
+    loop = asyncio.get_running_loop()
+    events: asyncio.Queue[dict] = asyncio.Queue()
+
+    def emit(event: dict):
+        loop.call_soon_threadsafe(events.put_nowait, event)
+
+    def run_preflight():
+        try:
+            result = task_service.preflight(
+                config,
+                progress_callback=lambda percent, message: emit({
+                    'type': 'progress', 'percent': percent, 'message': message,
+                }),
+            )
+            emit({'type': 'result', 'result': result})
+        except Exception as exc:
+            emit({'type': 'error', 'message': str(exc)})
+
+    async def event_generator():
+        threading.Thread(target=run_preflight, daemon=True).start()
+        while True:
+            event = await events.get()
+            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            if event['type'] in ('result', 'error'):
+                break
+
+    return StreamingResponse(
+        event_generator(), media_type='text/event-stream',
+        headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'},
+    )
 
 
 @router.post("/history/clear")

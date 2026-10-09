@@ -10,6 +10,7 @@ class VideoConfig(BaseModel):
     body_mode: Literal["normal", "grouped"] = Field(default="normal", description="后段拼接模式")
     body_groups: List["BodyGroup"] = Field(default_factory=list, max_length=4, description="按顺序拼接的 Body 分组")
     selection_mode: Literal["random", "speech_logic"] = Field(default="random", description="随机选段或按口播内容编排")
+    no_fallback_mix: bool = Field(default=False, description="口播风险素材可用但不按保底状态分级排序；已识别的不同产品不混用")
     semantic_sku: str = Field(default="", description="口播逻辑模式的目标产品；留空时从素材明确推断")
     semantic_topic: str = Field(default="", description="旧版主题字段，仅为兼容保留，不作为预检限制")
     bgm_dir: str = Field(default="", description="可选 BGM 目录或带音轨的视频文件")

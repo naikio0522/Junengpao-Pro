@@ -113,10 +113,12 @@ class SpeechLogicEngineTests(unittest.TestCase):
             request = VideoConfig(**config(root, selection_mode="speech_logic",
                                            body_dir=root / "body",
                                            base_out_dir=str(root / "out"),
+                                           no_fallback_mix=True,
                                            semantic_topic="旧预设里的任意主题"))
             response = TaskService(SharedMediaCache(str(root / "state"))).preflight(request)
             self.assertTrue(response["ok"], response)
             preview = response["report"][0]["speech_logic_preview"]
+            self.assertFalse(preview["fallback"])
             self.assertEqual(preview["product_id"], "JXB-99")
             self.assertEqual(len(preview["transcripts"]), 3)
             self.assertTrue(all(item["product_id"] == "JXB-99"

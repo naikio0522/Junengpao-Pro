@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { AccountUser, api } from '../api/client'
 
 const TOKEN_KEY = 'vm-local-test-account-token'
@@ -81,7 +82,7 @@ export function AccountEntry() {
       className="h-7 max-w-28 truncate rounded-[4px] border border-border/[0.14] px-2.5 text-[11px] text-foreground/85 hover:border-accent/60 hover:text-accent">
       {user ? `账户 · ${user.phone.slice(0, 3)}****${user.phone.slice(-4)}` : '登录 / 注册'}
     </button>
-    {open && <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4"
+    {open && createPortal(<div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/60 p-4"
       onPointerDown={event => { if (event.target === event.currentTarget) setOpen(false) }}>
       <section role="dialog" aria-modal="true" aria-label="账户" className="w-full max-w-sm rounded-lg border border-border/25 bg-background-elev p-4 text-foreground shadow-2xl">
         <div className="mb-3 flex items-center justify-between">
@@ -122,6 +123,6 @@ export function AccountEntry() {
           <p className="mt-3 text-[10px] leading-4 text-muted-foreground">仅在本机保存测试账户。手机号未经短信验证；注册成功不代表已创建云端账户。</p>
         </>}
       </section>
-    </div>}
+    </div>, document.body)}
   </>
 }

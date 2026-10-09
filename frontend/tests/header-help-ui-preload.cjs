@@ -4,6 +4,11 @@ localStorage.setItem('vm-config', JSON.stringify({
 }))
 window.electronAPI = {
   getBackendPort: async () => 8765,
+  openVideoFiles: async (defaultPath, extensions) => {
+    window.__videoPickerArgs = { defaultPath, extensions }
+    return ['C:\\hooks\\first.mp4', 'C:\\hooks\\second.mov']
+  },
+  openPath: async path => { (window.__openedPaths ||= []).push(path) },
   checkForUpdates: async () => ({ status: 'current', currentVersion: '0.1.2', message: '已是 0.x 通道的最新版本（v0.1.2）。' }),
   onUpdateDownloadProgress: () => () => {},
 }

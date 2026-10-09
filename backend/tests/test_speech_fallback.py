@@ -81,6 +81,73 @@ def config(root: Path, hook: Path, body: Path, **changes) -> dict:
 
 
 class SpeechFallbackTests(unittest.TestCase):
+    def test_no_fallback_mix_keeps_risk_clips_without_status_ranking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_video(root / 'hook', 'unlabelled-hook', 'red')
+            make_video(root / 'body', 'unlabelled-body', 'green')
+            settings = config(root, root / 'hook', root / 'body', no_fallback_mix=True)
+
+            with self._with_cues({}):
+                report = TaskService(SharedMediaCache(str(root / 'service-state'))).preflight(
+                    VideoConfig(**settings))
+            self.assertTrue(report['ok'])
+            self.assertEqual(report['capacity'], 1)
+            item = report['report'][0]
+            self.assertIn('非分级混剪', item['message'])
+            self.assertTrue(item['speech_logic_preview']['fallback'])
+            self.assertEqual(item['speech_logic_preview']['fallback_mode'],
+                             'unranked_clip_level')
+            self.assertEqual({source['status'] for source in
+                              item['speech_logic_preview']['transcripts']}, {'blocked'})
+
+            core, logs, ok, message = self._preflight_core(
+                root, root / 'hook', root / 'body', {}, no_fallback_mix=True)
+            try:
+                self.assertTrue(ok, message)
+                self.assertEqual(core.semantic_plans[0]['fallback_mode'],
+                                 'unranked_clip_level')
+                (root / 'out').mkdir(exist_ok=True)
+                success, output, _ = core.render_single_video(1, return_result=True)
+                self.assertTrue(success, '\n'.join(logs))
+                self.assertTrue(Path(output).is_file())
+            finally:
+                core.temp_dir.cleanup()
+
+    def test_unranked_mix_ignores_status_order_but_excludes_known_cross_product(self):
+        hook = [{'file': 'JXB-99-hook.mp4', 'duration_s': 2, 'status': 'usable',
+                 'product_id': 'JXB-99', 'has_audio': True}]
+        bodies = [
+            {'file': f'JXB-99-body-{index}.mp4', 'duration_s': 2, 'status': status,
+             'product_id': 'JXB-99', 'has_audio': True}
+            for index, status in enumerate(('usable', 'review', 'blocked'))
+        ]
+        bodies.append({'file': 'JXB-COLOR-body.mp4', 'duration_s': 2,
+                       'status': 'usable', 'product_id': 'JXB-COLOR', 'has_audio': True})
+        first = plan_clip_level_fallback(hook, bodies, target_product='JXB-99',
+                                         target_clips=2, max_variants=4, unranked=True)
+        changed_statuses = [{**item, 'status': 'blocked' if item['status'] == 'usable' else 'usable'}
+                            for item in bodies]
+        second = plan_clip_level_fallback(hook, changed_statuses, target_product='JXB-99',
+                                          target_clips=2, max_variants=4, unranked=True)
+        first_order = [plan['segments'][1]['file'] for plan in first]
+        second_order = [plan['segments'][1]['file'] for plan in second]
+        self.assertEqual(first_order, second_order)
+        self.assertEqual(len(first_order), 3)
+        self.assertNotIn('JXB-COLOR-body.mp4', first_order)
+        self.assertTrue(all(plan['fallback_mode'] == 'unranked_clip_level' for plan in first))
+
+        unknown_hook = [{'file': 'unknown-hook.mp4', 'duration_s': 2,
+                         'status': 'blocked', 'product_id': '', 'has_audio': True}]
+        no_target = plan_clip_level_fallback(unknown_hook, bodies,
+                                             target_clips=3, max_variants=4,
+                                             unranked=True)
+        self.assertTrue(no_target)
+        for plan in no_target:
+            known_products = {segment['product_id'] for segment in plan['segments']
+                              if segment['product_id']}
+            self.assertLessEqual(len(known_products), 1)
+
     def test_later_risk_tiers_fill_extra_drafts_after_same_product(self):
         hook = [{'file': 'JXB-99-hook.mp4', 'duration_s': 2, 'status': 'usable',
                  'product_id': 'JXB-99', 'has_audio': True}]

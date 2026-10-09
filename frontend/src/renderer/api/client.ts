@@ -58,6 +58,7 @@ export interface VideoConfig {
   body_mode: 'normal' | 'grouped'
   body_groups: BodyGroup[]
   selection_mode: 'random' | 'speech_logic'
+  no_fallback_mix?: boolean
   semantic_sku?: string
   semantic_topic?: string
   bgm_dir: string
@@ -219,7 +220,7 @@ export interface AccountSession {
 
 export interface SpeechLogicPreview {
   fallback?: boolean
-  fallback_mode?: 'clip_level'
+  fallback_mode?: 'clip_level' | 'unranked_clip_level'
   product_id?: string
   sku_id: string
   topic_id: string
@@ -270,6 +271,69 @@ export interface PreflightResult {
   capacity: number | string
   report: PreflightReportItem[]
   error?: string
+}
+
+async function streamPreflight(
+  config: VideoConfig,
+  onProgress: (percent: number, message: string) => void,
+): Promise<PreflightResult> {
+  const baseUrl = await getBaseUrl()
+  const res = await fetch(`${baseUrl}/preflight`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream, application/json' },
+    body: JSON.stringify(normalizeConfigForRequest(config)),
+  })
+  if (!res.ok) {
+    const error = await res.json().catch(() => ({ detail: 'Unknown error' }))
+    throw new Error(formatApiError(error.detail, `请求失败（HTTP ${res.status}）`))
+  }
+  // Older packaged backends and UI test fixtures still answer with JSON.
+  if (!res.headers.get('content-type')?.includes('text/event-stream') || !res.body) {
+    const result = await res.json() as PreflightResult
+    onProgress(100, '全部素材预检完成')
+    return result
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: PreflightResult | undefined
+  const acceptEvent = (block: string) => {
+    const data = block.split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trimStart())
+      .join('\n')
+    if (!data) return
+    const event = JSON.parse(data) as {
+      type: 'progress' | 'result' | 'error'
+      percent?: number
+      message?: string
+      result?: PreflightResult
+    }
+    if (event.type === 'progress' && typeof event.percent === 'number') {
+      onProgress(Math.max(0, Math.min(100, event.percent)), event.message || '')
+    } else if (event.type === 'result') {
+      result = event.result
+    } else if (event.type === 'error') {
+      throw new Error(event.message || '预检失败')
+    }
+  }
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (value) buffer += decoder.decode(value, { stream: true })
+      const blocks = buffer.split(/\r?\n\r?\n/)
+      buffer = blocks.pop() || ''
+      blocks.forEach(acceptEvent)
+      if (done) break
+    }
+    buffer += decoder.decode()
+    if (buffer.trim()) acceptEvent(buffer)
+  } finally {
+    reader.releaseLock()
+  }
+  if (!result) throw new Error('预检连接中断，未收到结果')
+  return result
 }
 
 export const api = {
@@ -343,11 +407,13 @@ export const api = {
       body: JSON.stringify(normalizeConfigForRequest(config)),
     }),
 
-  preflight: (config: VideoConfig) =>
-    request<PreflightResult>('/preflight', {
-      method: 'POST',
-      body: JSON.stringify(normalizeConfigForRequest(config)),
-    }),
+  preflight: (config: VideoConfig, onProgress?: (percent: number, message: string) => void) =>
+    onProgress
+      ? streamPreflight(config, onProgress)
+      : request<PreflightResult>('/preflight', {
+          method: 'POST',
+          body: JSON.stringify(normalizeConfigForRequest(config)),
+        }),
 
   clearHistory: () =>
     request<{ message: string }>('/history/clear', { method: 'POST' }),

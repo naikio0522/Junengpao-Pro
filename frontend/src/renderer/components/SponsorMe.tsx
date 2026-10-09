@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
 const alipayQr = new URL('../assets/alipay-sponsor.jpg', import.meta.url).href
 const wechatPayQr = new URL('../assets/wechat-pay-sponsor.jpg', import.meta.url).href
@@ -34,7 +35,7 @@ export function SponsorMe() {
         className="h-7 shrink-0 rounded-[4px] border border-border/[0.14] bg-foreground/[0.02] px-2.5 text-[11px] text-foreground hover:border-accent/60 hover:text-accent">
         赞助我
       </button>
-      {open && <div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/60 p-4"
+      {open && createPortal(<div className="fixed inset-0 z-[1100] flex items-center justify-center bg-black/60 p-4"
         onPointerDown={event => { if (event.target === event.currentTarget) close() }}>
         <div role="dialog" aria-modal="true" aria-label="赞助我"
           className="flex max-h-[calc(100vh-32px)] w-[min(480px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-border/20 bg-background-elev p-4 text-foreground shadow-2xl">
@@ -62,7 +63,7 @@ export function SponsorMe() {
             </p>
           </div>
         </div>
-      </div>}
+      </div>, document.body)}
     </>
   )
 }

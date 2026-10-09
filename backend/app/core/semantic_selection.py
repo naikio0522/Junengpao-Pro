@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import heapq
+import hashlib
 import os
 import re
 from collections import Counter
@@ -151,14 +152,15 @@ def plan_clip_level_fallback(
     body_sources: Iterable[Mapping[str, Any]], *,
     target_product: str = "", target_clips: int = 2,
     strict_failure: str = "", max_variants: int = 256,
+    unranked: bool = False,
 ) -> list[dict[str, Any]]:
     """Build review-only drafts from *whole* source clips after semantic planning fails.
 
-    This never invents a product label or claims that the join is fluent.  Pair
-    ranking is product compatibility first, then source diagnostic tier.  In
-    particular, a same-product blocked source outranks a cross-product review
-    source.  Each file is used at most once in an output, and variants differ
-    by their Hook/first-Body pair rather than random sub-second offsets.
+    This never invents a product label or claims that the join is fluent.
+    The default ranks product compatibility first, then diagnostic tier. The
+    optional unranked mode admits all diagnostic tiers without ordering them,
+    but excludes *known* cross-product combinations.  Each file is used at
+    most once in an output; variants differ by their Hook/first-Body pair.
     """
     tiers = {"usable": 0, "review": 1, "blocked": 2}
 
@@ -195,18 +197,39 @@ def plan_clip_level_fallback(
             return 1
         return 2
 
+    def unranked_compatible(hook: Mapping[str, Any], body: Mapping[str, Any]) -> bool:
+        left, right = hook["product_id"], body["product_id"]
+        return not ((left and right and left != right) or
+                    (target_product and any(product and product != target_product
+                                            for product in (left, right))))
+
+    def stable_mix_key(*paths: str) -> int:
+        # A stable pseudo-random order keeps preflight and the actual render in
+        # sync while avoiding status or product-tier preference in this mode.
+        key = "\0".join((target_product, *paths)).encode("utf-8", "surrogatepass")
+        return int.from_bytes(hashlib.blake2b(key, digest_size=8).digest(), "big")
+
     # Do not materialize Hook × Body for a large commercial footage library.
-    # Keep a bounded, ranked set so lower-confidence or cross-product pairs can
-    # fill a requested draft count only after safer distinct pairs are used.
+    # Keep a bounded set: ranked by safety normally, or by a stable hash when
+    # the user explicitly opts out of the status-tier fallback priority.
     candidate_limit = max(1, min(4096, max(256, int(max_variants) * 4)))
-    pair_candidates = heapq.nsmallest(candidate_limit,
-        ((pair_rank(hook, body),
-          tiers.get(hook["status"], 2) + tiers.get(body["status"], 2),
-          tiers.get(hook["status"], 2), tiers.get(body["status"], 2),
-          str(hook["file"]).lower(), str(body["file"]).lower(), hook, body)
-         for hook in hooks for body in bodies if hook["file"] != body["file"]),
-        key=lambda value: value[:6],
-    )
+    if unranked:
+        pair_candidates = heapq.nsmallest(candidate_limit,
+            ((0, stable_mix_key(str(hook["file"]), str(body["file"])), 0, 0,
+              str(hook["file"]).lower(), str(body["file"]).lower(), hook, body)
+             for hook in hooks for body in bodies
+             if hook["file"] != body["file"] and unranked_compatible(hook, body)),
+            key=lambda value: value[:6],
+        )
+    else:
+        pair_candidates = heapq.nsmallest(candidate_limit,
+            ((pair_rank(hook, body),
+              tiers.get(hook["status"], 2) + tiers.get(body["status"], 2),
+              tiers.get(hook["status"], 2), tiers.get(body["status"], 2),
+              str(hook["file"]).lower(), str(body["file"]).lower(), hook, body)
+             for hook in hooks for body in bodies if hook["file"] != body["file"]),
+            key=lambda value: value[:6],
+        )
     if not pair_candidates:
         return []
     def segment(source: Mapping[str, Any], role: str) -> dict[str, Any]:
@@ -231,14 +254,18 @@ def plan_clip_level_fallback(
     plans = []
     seen: set[tuple[str, ...]] = set()
     for rank, _quality, _hook_quality, _body_quality, _hook_path, _body_path, hook, first_body in pair_candidates:
-        known = hook["product_id"] or first_body["product_id"]
+        known = target_product if unranked and target_product else hook["product_id"] or first_body["product_id"]
         compatible = sorted(
             (body for body in bodies if body["file"] != first_body["file"]
              and body["file"] != hook["file"]
-             and (not known or not body["product_id"] or body["product_id"] == known)),
-            key=lambda body: (tiers.get(body["status"], 2),
-                              0 if body["product_id"] == known else 1,
-                              str(body["file"]).lower()),
+             and ((not body["product_id"] or body["product_id"] == known)
+                  if unranked else
+                  (not known or not body["product_id"] or body["product_id"] == known))),
+            key=(lambda body: (stable_mix_key(str(hook["file"]), str(first_body["file"]), str(body["file"])),
+                               str(body["file"]).lower())) if unranked else
+                (lambda body: (tiers.get(body["status"], 2),
+                               0 if body["product_id"] == known else 1,
+                               str(body["file"]).lower())),
         )
         chosen_bodies = [first_body] + compatible[:max(0, target_clips - 2)]
         key = tuple([str(hook["file"])] + [str(item["file"]) for item in chosen_bodies])
@@ -250,6 +277,8 @@ def plan_clip_level_fallback(
         selected_products = {item["product_id"] for item in selected if item["product_id"]}
         product = next(iter(selected_products)) if len(selected_products) == 1 else ""
         warnings = ["语义选段未通过，已降级为完整原片拼接；台词顺接、画面及功效需人工复核"]
+        if unranked:
+            warnings.append("不做分级保底：同产品候选不按可用、需复核、未采用的状态排序；成片需逐条人工复核")
         if strict_failure:
             warnings.append(f"原语义方案未通过：{strict_failure}")
         if len(selected_products) > 1:
@@ -258,6 +287,8 @@ def plan_clip_level_fallback(
             warnings.append("产品无法确认，仅供人工复核，不可直接投放")
         elif target_product and product != target_product:
             warnings.append(f"所选素材产品 {product} 与指定产品 {target_product} 不一致，仅供人工复核，不可直接投放")
+        if any(not item["product_id"] for item in selected):
+            warnings.append("部分素材产品无法确认，需人工核对画面和口播")
         if any(not item.get("has_audio") for item in selected):
             warnings.append("有素材无有效原声，导出后请检查声音")
         if any(not str(item.get("text") or "").strip() for item in selected):
@@ -278,7 +309,8 @@ def plan_clip_level_fallback(
             "segments": segments, "warnings": list(dict.fromkeys(warnings)),
             "needs_visual_review": True, "needs_speaker_review": True,
             "needs_audio_review": True, "fallback": True,
-            "fallback_mode": "clip_level", "variant_index": len(plans),
+            "fallback_mode": "unranked_clip_level" if unranked else "clip_level",
+            "variant_index": len(plans),
             "rejections": {}, "product_match_rank": rank,
         })
     for plan in plans:

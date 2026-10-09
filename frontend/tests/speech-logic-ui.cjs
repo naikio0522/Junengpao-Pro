@@ -13,7 +13,9 @@ app.whenReady().then(async () => {
       preload: path.join(__dirname, 'speech-logic-ui-preload.cjs'),
     },
   })
-  const evaluate = expression => win.webContents.executeJavaScript(expression)
+  const evaluate = expression => win.webContents.executeJavaScript(expression).catch(error => {
+    throw new Error(`Renderer expression failed: ${expression}\n${error.stack || error}`)
+  })
   const setInput = async (label, value) => evaluate(`(() => {
     const input = document.querySelector('input[aria-label=${JSON.stringify(label)}]');
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
@@ -69,15 +71,23 @@ app.whenReady().then(async () => {
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("需复核")'), true)
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("句末由规则推断，请复听")'), true)
 
+    await evaluate('[...document.querySelectorAll("button")].find(node => node.textContent.trim().startsWith("渲染设置")).click()')
+    assert.equal(await evaluate('document.body.innerText.includes("成品去重变换")'), true)
+    assert.equal(await evaluate('document.querySelector("[aria-label=不做保底混剪]")?.getAttribute("data-state")'), 'unchecked')
+    await evaluate('document.querySelector("[aria-label=不做保底混剪]").click()')
+    assert.equal(await evaluate('JSON.parse(localStorage.getItem("vm-config")).no_fallback_mix'), true)
+
     await setInput('产品（可选）', '色修牙膏')
     await pause()
+    await evaluate('[...document.querySelectorAll("button")].find(node => node.textContent.trim().startsWith("口播预览")).click()')
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("修改素材或设置后需重新预检")'), true)
     await evaluate('window.__speechFallback = true')
     await click('预检产能')
     for (let i = 0; i < 50; i++) {
-      if (await evaluate('document.querySelector("[aria-label=口播预览]")?.textContent.includes("保底混剪")')) break
+      if (await evaluate('document.querySelector("[aria-label=口播预览]")?.textContent.includes("非分级混剪")')) break
       await pause()
     }
+    assert.equal(await evaluate('window.__speechPreflightRequests.at(-1).no_fallback_mix'), true)
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("未验证的转录、产品或价促内容可能进入成片")'), true)
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("未取得可靠台词；请复听原声")'), true)
     assert.equal(await evaluate('document.querySelector("[aria-label=口播预览]").textContent.includes("没有可用口播转录")'), true)

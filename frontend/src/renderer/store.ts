@@ -43,6 +43,7 @@ const defaultConfig: VideoConfig = {
   body_mode: 'normal',
   body_groups: Array.from({ length: 4 }, (_, index) => ({ enabled: index === 0, folder: '', clip_count: 1, clip_duration: 3 })),
   selection_mode: 'random',
+  no_fallback_mix: false,
   semantic_sku: '',
   semantic_topic: '',
   bgm_dir: '',
@@ -107,6 +108,7 @@ function loadSavedConfig(): VideoConfig {
       duration_mode: saved.selection_mode !== 'speech_logic' && saved.bgm_dir?.trim() && saved.duration_mode === 'bgm' ? 'bgm' : 'clips',
       body_mode: saved.selection_mode === 'speech_logic' ? 'normal' : saved.body_mode === 'grouped' ? 'grouped' : 'normal',
       selection_mode: saved.selection_mode === 'speech_logic' ? 'speech_logic' : 'random',
+      no_fallback_mix: saved.no_fallback_mix === true,
       semantic_sku: typeof saved.semantic_sku === 'string' ? saved.semantic_sku : '',
       semantic_topic: typeof saved.semantic_topic === 'string' ? saved.semantic_topic : '',
       body_groups: Array.from({ length: 4 }, (_, index) => ({

@@ -366,11 +366,12 @@ ipcMain.handle('dialog:openFile', async (_, filters, defaultPath?: string) => {
   return result.canceled ? null : result.filePaths[0]
 })
 
-ipcMain.handle('dialog:openVideoFiles', async () => {
+ipcMain.handle('dialog:openVideoFiles', async (_, defaultPath?: string, extensions?: string[]) => {
   if (!mainWindow) return null
   const result = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: '视频文件', extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }],
+    filters: [{ name: '视频文件', extensions: extensions?.length ? extensions : ['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v'] }],
+    defaultPath: resolveDialogDefaultPath(defaultPath),
   })
   return result.canceled ? null : result.filePaths
 })

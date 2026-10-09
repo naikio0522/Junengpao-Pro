@@ -32,6 +32,13 @@ app.whenReady().then(async () => {
     await win.loadFile(path.join(__dirname, '../dist/renderer/index.html'))
     await waitFor('Boolean(document.querySelector("button[aria-label=登录或注册]"))')
     await evaluate('document.querySelector("button[aria-label=登录或注册]").click()')
+    assert.equal(await evaluate(`(() => {
+      const dialog = document.querySelector('[role=dialog][aria-label=账户]')
+      const overlay = dialog?.parentElement
+      const bounds = dialog?.getBoundingClientRect()
+      return overlay?.parentElement === document.body && bounds &&
+        Math.abs((bounds.top + bounds.bottom) / 2 - window.innerHeight / 2) < 12
+    })()`), true, 'account dialog is centered in the viewport, not the topbar')
     assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("仅在本机保存测试账户")'), true)
     assert.equal(await evaluate('document.querySelector("[role=dialog][aria-label=账户]").innerText.includes("手机号未经短信验证")'), true)
 

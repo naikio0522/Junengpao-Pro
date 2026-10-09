@@ -153,15 +153,15 @@ function SpeechPreviewCard({ item }: { item: PreflightReportItem }) {
       <div className="text-[11px] font-semibold text-accent">{item.name} · 产品：{preview.product_id || '待识别'}</div>
       {item.ok ? <p className="text-[10px] leading-4 text-muted-foreground">
         {isFallback
-          ? `保底混剪：优先同产品，依次选可用、需复核、未采用；使用 ${preview.hook_segment_count} 段 Hook（约 ${Number(preview.hook_duration_s || 0).toFixed(1)} 秒）接 ${bodySegments.length} 段 Body，预计可输出 ${preview.capacity} 条。`
+          ? `${preview.fallback_mode === 'unranked_clip_level' ? '非分级混剪：同产品候选不按可用、需复核、未采用排序' : '保底混剪：优先同产品，依次选可用、需复核、未采用'}；使用 ${preview.hook_segment_count} 段 Hook（约 ${Number(preview.hook_duration_s || 0).toFixed(1)} 秒）接 ${bodySegments.length} 段 Body，预计可输出 ${preview.capacity} 条。`
           : `首个方案：Hook ${preview.hook_segment_count} 段话段合成一整段（约 ${Number(preview.hook_duration_s || 0).toFixed(1)} 秒），接 ${bodySegments.length} 段 Body；可编排 ${preview.capacity} 组。`}
       </p> : <p className="text-[10px] leading-4 text-hot">预检未通过：{item.message}</p>}
       {isFallback && <p className="rounded-[4px] border border-amber-500/25 bg-amber-500/[0.07] p-2 text-[10px] leading-4 text-amber-400">
-        当前使用整段原声保底方案，未验证的转录、产品或价促内容可能进入成片。可继续渲染，但发布前请逐条人工复核画面和声音。
+        当前使用整段原声{preview.fallback_mode === 'unranked_clip_level' ? '非分级混剪' : '保底'}方案，未验证的转录、产品或价促内容可能进入成片。可继续渲染，但发布前请逐条人工复核画面和声音。
       </p>}
       {!!preview.segments?.length && (['hook', 'body'] as const).map((kind) => (
         <div key={kind} className="space-y-1">
-          <h3 className="text-[10px] font-semibold text-foreground">{kind === 'hook' ? 'Hook 首段' : 'Body 后段'}{isFallback ? '：原片保底' : kind === 'hook' ? '：完整表达' : '：顺接话术'}</h3>
+          <h3 className="text-[10px] font-semibold text-foreground">{kind === 'hook' ? 'Hook 首段' : 'Body 后段'}{isFallback ? '：完整原片' : kind === 'hook' ? '：完整表达' : '：顺接话术'}</h3>
           {(kind === 'hook' ? hookSegments : bodySegments).map((segment, index) => (
             <div key={`${segment.source_file}-${segment.start_s}-${segment.end_s}-${index}`} className="rounded-[4px] border border-border/[0.09] bg-background/60 p-2">
               <p className="text-[11px] leading-[1.5] text-foreground">{index + 1}. {segment.text || (isFallback ? '未取得可靠台词；请复听原声' : '台词待确认')}</p>
@@ -371,6 +371,7 @@ export default function SinglePage() {
   const [benchmarkRunning, setBenchmarkRunning] = useState(false)
   const [benchmarkProgress, setBenchmarkProgress] = useState(0)
   const [preflightRunning, setPreflightRunning] = useState(false)
+  const [preflightProgress, setPreflightProgress] = useState<{ percent: number; message: string } | null>(null)
   const [speechPreflight, setSpeechPreflight] = useState<{ configKey: string; items: PreflightReportItem[] } | null>(null)
   const [completionNotice, setCompletionNotice] = useState<string | null>(null)
   const [workflow, setWorkflow] = useState<'mix' | 'dedup'>(() => localStorage.getItem('vm-workflow') === 'dedup' ? 'dedup' : 'mix')
@@ -673,13 +674,25 @@ export default function SinglePage() {
 
   const browseHookVideo = async () => {
     if (!window.electronAPI) { addToast('请在 Electron 中运行', 'warning'); return }
-    const selected = await window.electronAPI.openFile(
-      [{ name: '视频', extensions: ['mp4', 'mov'] }],
+    const selected = await window.electronAPI.openVideoFiles(
       browseStartDirectory('hook_dir', config.hook_dir, isFilePath(config.hook_dir)),
+      ['mp4', 'mov'],
     )
-    if (!selected) return
-    rememberBrowseDirectory('hook_dir', selected, true)
-    setConfig({ hook_dir: selected })
+    if (!selected?.length) return
+    const seen = new Set<string>()
+    const paths = selected.filter((path) => {
+      const key = path.toLocaleLowerCase()
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    if (paths.some(path => path.includes(';'))) {
+      addToast('所选视频路径含分号，无法作为多选素材使用；请先重命名路径', 'warning')
+      return
+    }
+    rememberBrowseDirectory('hook_dir', paths.at(-1)!, true)
+    setConfig({ hook_dir: paths.join('; ') })
+    addToast(`已选择 ${paths.length} 个 Hook 视频`, 'success')
   }
 
   const updateBodyGroup = (index: number, patch: Partial<(typeof config.body_groups)[number]>) => {
@@ -709,22 +722,6 @@ export default function SinglePage() {
     }
   }
 
-  const browseBgmVideo = async () => {
-    if (!window.electronAPI) { addToast('请在 Electron 中运行', 'warning'); return }
-    const selectedPath = await window.electronAPI.openFile(
-      [{
-        name: '带声音的视频',
-        extensions: ['mp4', 'mov', 'mkv', 'avi', 'webm'],
-      }],
-      browseStartDirectory('bgm_dir', config.bgm_dir, isFilePath(config.bgm_dir)),
-    )
-    if (selectedPath) {
-      rememberBrowseDirectory('bgm_dir', selectedPath, true)
-      setConfig({ bgm_dir: selectedPath })
-      addToast('已选择视频音轨作为 BGM', 'success')
-    }
-  }
-
   const startRender = async () => {
     const runConfig = ensureRunConfig()
     if (!runConfig) return
@@ -743,15 +740,24 @@ export default function SinglePage() {
     const runConfig = ensureRunConfig()
     if (!runConfig || preflightRunning) return
     setPreflightRunning(true)
+    setPreflightProgress({ percent: 0, message: '准备检查素材' })
     setSpeechPreflight(null)
     setRightTab('log')
     clearLogs()
     appendLog('>>> [预检] 正在扫描素材，请稍候...')
     try {
-      const res = await api.preflight(runConfig)
+      const res = await api.preflight(runConfig, (percent, message) => {
+        setPreflightProgress({ percent, message })
+      })
+      setPreflightProgress({ percent: 100, message: '全部素材预检完成' })
       clearLogs()
       ;(res.report || []).forEach((item) => appendLog(`${!item.ok ? '❌' : item.speech_logic_preview?.fallback ? '⚠️' : '✅'} [${item.name}] ${item.message}`))
-      appendLog(`>>> 预检完成。预计可输出: ${res.capacity} 条；同产品优先，需复核和未采用素材仅在优选不足时补入。`)
+      const preflightSummary = runConfig.selection_mode !== 'speech_logic'
+        ? '按当前混剪素材与时长设置执行。'
+        : runConfig.no_fallback_mix
+          ? '非分级混剪不按可用、需复核、未采用排序，已识别的不同产品不混用。'
+          : '同产品优先，需复核和未采用素材仅在优选不足时补入。'
+      appendLog(`>>> 预检完成。预计可输出: ${res.capacity} 条；${preflightSummary}`)
       const previewItems = (res.report || []).filter(item => item.speech_logic_preview)
       if (runConfig.selection_mode === 'speech_logic' && previewItems.length) {
         setSpeechPreflight({ configKey: JSON.stringify(config), items: previewItems })
@@ -761,6 +767,7 @@ export default function SinglePage() {
     }
     catch (e: any) {
       const message = e?.message || '预检请求失败'
+      setPreflightProgress((previous) => ({ percent: previous?.percent ?? 0, message: '预检失败' }))
       appendLog(`[预检失败] ${message}`)
       addToast(message, 'error')
     } finally {
@@ -845,7 +852,7 @@ export default function SinglePage() {
         {/* Header */}
         <div className="vm-topbar flex shrink-0 flex-wrap items-center justify-between gap-x-5 gap-y-2 rounded-[18px] px-4 py-2.5 mb-3">
           <div className="flex min-w-0 flex-wrap items-center gap-2.5">
-            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.4</span></h1>
+            <h1 className="shrink-0 text-[16px] font-bold tracking-tight text-foreground">巨能跑<span className="text-accent">pro</span>版 <span className="ml-1 rounded-full border border-accent/20 bg-accent/[0.08] px-1.5 py-0.5 text-[10px] font-medium text-accent">v0.1.5</span></h1>
             <FeatureHelp tutorial />
             <ContactMe />
             <SponsorMe />
@@ -931,9 +938,12 @@ export default function SinglePage() {
               </button>
             )}>
               <div className="grid grid-cols-1 gap-2">
-                <AssetCard kind="hook" label="Hook 首段" value={config.hook_dir} count={scannedFiles.hook?.count} required pickAction="文件夹" secondaryAction="视频" onSecondaryAction={browseHookVideo}
+                <AssetCard kind="hook" label="Hook 首段" value={config.hook_dir} count={splitPathList(config.hook_dir).length > 1 ? splitPathList(config.hook_dir).length : scannedFiles.hook?.count} required pickAction="文件夹" secondaryAction="视频（可多选）" onSecondaryAction={browseHookVideo}
                   onChange={(v) => setConfig({ hook_dir: v })}
-                  onOpen={() => openConfiguredPath(config.hook_dir, isFilePath(config.hook_dir))}
+                  onOpen={() => {
+                    const firstHook = splitPathList(config.hook_dir)[0] || ''
+                    openConfiguredPath(firstHook, isFilePath(firstHook))
+                  }}
                   onBrowse={() => browse('hook_dir')}        onClear={() => setConfig({ hook_dir: '' })} />
                 <div className="space-y-2 rounded-[14px] border border-border/[0.14] bg-background-elev/[0.55] p-2">
                   <div className="flex items-center justify-between gap-2 px-0.5">
@@ -973,7 +983,7 @@ export default function SinglePage() {
                 <AssetCard kind="bgm"       label="BGM"  value={config.bgm_dir}              count={scannedFiles.bgm?.count} pickAction="目录"
                   onChange={(v) => setConfig({ bgm_dir: v })}
                   onOpen={() => openConfiguredPath(config.bgm_dir, isFilePath(config.bgm_dir))}
-                  onBrowse={() => browse('bgm_dir')}         secondaryAction="视频" onSecondaryAction={browseBgmVideo}
+                  onBrowse={() => browse('bgm_dir')}
                   bodyOnly={!config.apply_bgm_to_hook} onBodyOnlyChange={(v) => setConfig({ apply_bgm_to_hook: !v })}
                   onClear={() => setConfig({ bgm_dir: '' })} />
                 <AssetCard kind="voice"     label="配音"      value={config.voice_dir || ''}
@@ -1154,9 +1164,22 @@ export default function SinglePage() {
 
               <div className="flex flex-col items-stretch justify-center gap-1.5 border-l border-border/[0.14] pl-3">
                 <span className="text-center text-[10px] text-muted-foreground">操作<FeatureHelp topic="actions" title="操作按钮" /></span>
-                <button type="button" onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary h-9 px-2 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
-                  {preflightRunning ? '预检中...' : '预检产能'}
-                </button>
+                <div className="space-y-1.5">
+                  <button type="button" onClick={preFlight} disabled={preflightRunning} className="vm-action-secondary h-9 w-full px-2 text-[12px] font-semibold disabled:cursor-wait disabled:opacity-70">
+                    {preflightRunning ? `预检中 ${preflightProgress?.percent ?? 0}%` : '预检产能'}
+                  </button>
+                  {preflightProgress && (
+                    <div role="progressbar" aria-label="预检产能进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={preflightProgress.percent} className="min-w-0" title={preflightProgress.message}>
+                      <div className="mb-0.5 flex items-center justify-between gap-1 text-[9px] text-muted-foreground">
+                        <span className="min-w-0 truncate">{preflightProgress.message}</span>
+                        <span className="shrink-0 font-mono tabular-nums">{preflightProgress.percent}%</span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-foreground/[0.10]">
+                        <div className="h-full rounded-full bg-accent transition-[width] duration-300" style={{ width: `${preflightProgress.percent}%` }} />
+                      </div>
+                    </div>
+                  )}
+                </div>
                 <button type="button" onClick={startRender} disabled={isRunning} className="vm-action-primary h-10 bg-accent px-2 text-[12px] font-bold text-background hover:bg-accent-hover disabled:opacity-50">
                   {isRunning ? '启动中…' : '启动渲染'}
                 </button>
@@ -1238,7 +1261,7 @@ export default function SinglePage() {
                 ...(config.selection_mode === 'speech_logic' ? [{ k: 'speech' as const, label: '口播预览', count: visibleSpeechPreviews.length }] : []),
                 { k: 'tasks',  label: '任务', count: tasks.length },
                 { k: 'output', label: '产出', count: allOutputItems.length },
-                { k: 'variant', label: '混剪后去重', count: config.enable_variants ? 'ON' : 'OFF' },
+                { k: 'variant', label: '渲染设置', count: (config.enable_variants || (config.selection_mode === 'speech_logic' && config.no_fallback_mix)) ? 'ON' : 'OFF' },
               ] as const).map(t => (
                 <button
                   key={t.k}
@@ -1302,7 +1325,7 @@ export default function SinglePage() {
               {rightTab === 'speech' && config.selection_mode === 'speech_logic' && (
                 <div role="region" aria-label="口播预览" className="vm-log-panel absolute inset-0 space-y-3 overflow-auto px-3 py-3">
                   {visibleSpeechPreviews.length ? <>
-                    <p className="text-[10px] leading-4 text-muted-foreground">以下为预检的首个编排方案。同产品优先，再按可用、需复核、未采用依次选素材；请核对原声、Hook 是否完整，以及 Body 是否自然承接。保底混剪仍需发布前复核。</p>
+                    <p className="text-[10px] leading-4 text-muted-foreground">以下为预检的首个编排方案。{config.no_fallback_mix ? '风险素材可参与，但不按状态分级排序；已识别的不同产品不混用。' : '保底时同产品优先，再按可用、需复核、未采用依次选素材。'}请核对原声、Hook 是否完整，以及 Body 是否自然承接；风险方案发布前需人工复核。</p>
                     {visibleSpeechPreviews.map(item => item.speech_logic_preview && (
                       <SpeechPreviewCard key={item.name} item={item} />
                     ))}
@@ -1360,9 +1383,33 @@ export default function SinglePage() {
                 </div>
               )}
 
-              {/* OUTPUT TRANSFORMER */}
+              {/* RENDER SETTINGS */}
               {rightTab === 'variant' && (
-                <div className="vm-log-panel absolute inset-0 px-5 py-5">
+                <div className="vm-log-panel absolute inset-0 overflow-auto px-5 py-5">
+                  <div className="border-b border-border/[0.10] pb-5">
+                    <div className="flex items-start justify-between gap-4">
+                      <div>
+                        <div className="text-[13px] font-semibold text-foreground">不做保底混剪</div>
+                        <p className="mt-1 text-[10px] leading-5 text-muted-foreground">仅适用于口播逻辑。开启后，语义方案不足时仍可使用风险素材，但不按“可用→需复核→未采用”分级排序；已识别的不同产品不混用。</p>
+                      </div>
+                      <label className={`mt-0.5 flex shrink-0 items-center gap-2 ${config.selection_mode === 'speech_logic' ? 'cursor-pointer' : 'cursor-not-allowed opacity-40'}`}>
+                        <span className={`text-[11px] ${config.selection_mode === 'speech_logic' && config.no_fallback_mix ? 'text-accent' : 'text-muted-foreground'}`}>
+                          {config.selection_mode === 'speech_logic' && config.no_fallback_mix ? '已开启' : '已关闭'}
+                        </span>
+                        <Checkbox
+                          aria-label="不做保底混剪"
+                          checked={Boolean(config.no_fallback_mix)}
+                          disabled={config.selection_mode !== 'speech_logic'}
+                          onCheckedChange={(value) => setConfig({ no_fallback_mix: value === true })}
+                        />
+                      </label>
+                    </div>
+                    <p className="mt-2 rounded-[5px] border border-border/[0.08] bg-foreground/[0.02] px-3 py-2 text-[10px] leading-5 text-foreground/75">
+                      关闭时保持原有保底策略：优先同产品，再依次选可用、需复核、未采用素材。两种模式下的风险方案都需要人工复核。
+                    </p>
+                  </div>
+
+                  <div className="pt-5">
                   <div className="flex items-center justify-between border-b border-border/[0.06] pb-4">
                     <div>
                       <div className="text-[13px] font-semibold text-foreground">成品去重变换<FeatureHelp topic="variants" title="成品变换" /></div>
@@ -1429,6 +1476,7 @@ export default function SinglePage() {
                       <div className="flex justify-between"><span className="text-muted-foreground">输出规格</span><span className="text-ok">保持</span></div>
                       <div className="flex justify-between"><span className="text-muted-foreground">失败策略</span><span className="text-ok">保留原成品</span></div>
                     </div>
+                  </div>
                   </div>
                 </div>
               )}

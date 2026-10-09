@@ -67,6 +67,13 @@ app.whenReady().then(async () => {
     await assertQrFullyVisible('联系我')
     await evaluate('document.querySelector("[aria-label=隐藏联系方式]").click()')
     await evaluate('document.querySelector("[aria-label=赞助我]").click()')
+    assert.equal(await evaluate(`(() => {
+      const dialog = document.querySelector('[role=dialog][aria-label=赞助我]')
+      const overlay = dialog?.parentElement
+      const bounds = dialog?.getBoundingClientRect()
+      return overlay?.parentElement === document.body && bounds &&
+        Math.abs((bounds.top + bounds.bottom) / 2 - window.innerHeight / 2) < 12
+    })()`), true, 'sponsor dialog is centered in the viewport, not the topbar')
     assert.equal(await evaluate("document.querySelector('[role=dialog][aria-label=赞助我] img')?.getAttribute('alt') === '支付宝赞助二维码'"), true)
     await assertQrFullyVisible('赞助我')
     await evaluate('document.querySelector("[role=dialog][aria-label=赞助我] [role=tab][aria-selected=false]").click()')
@@ -75,6 +82,15 @@ app.whenReady().then(async () => {
     await evaluate('document.querySelector("[aria-label=关闭赞助面板]").click()')
     win.setSize(1280, 1080)
     await pause(100)
+    assert.equal(await evaluate(`(() => {
+      const row = document.querySelector('input[aria-label="BGM 路径"]')?.closest('.group')
+      return row && ![...row.querySelectorAll('button')].some(button => button.textContent.trim() === '视频')
+    })()`), true, 'BGM does not offer a video picker')
+    await evaluate('[...document.querySelectorAll("button")].find(node => node.textContent.trim() === "视频（可多选）").click()')
+    assert.equal(await evaluate(`document.querySelector('input[aria-label="Hook 首段"]')?.value`), 'C:\\hooks\\first.mp4; C:\\hooks\\second.mov')
+    assert.equal(await evaluate('JSON.stringify(window.__videoPickerArgs.extensions)'), '["mp4","mov"]')
+    await evaluate(`document.querySelector('input[aria-label="Hook 首段"]').closest('.group').querySelector('button').click()`)
+    assert.equal(await evaluate('JSON.stringify(window.__openedPaths)'), '["C:\\\\hooks"]')
     await evaluate('document.querySelector("[aria-label=打开重叠率说明]").click()')
     assert.equal(await evaluate('document.querySelector("[aria-label=打开重叠率说明]").getAttribute("aria-expanded")'), 'true')
     assert.equal(await evaluate('document.querySelector("#overlap-rate-help").innerText.includes("0%") && document.querySelector("#overlap-rate-help").innerText.includes("30%")'), true)
@@ -96,6 +112,7 @@ app.whenReady().then(async () => {
     await pause(500)
     win.webContents.invalidate()
     await pause(200)
+    fs.mkdirSync(path.join(__dirname, '../release'), { recursive: true })
     fs.writeFileSync(path.join(__dirname, '../release/header-help-ui-test.png'), (await win.webContents.capturePage()).toPNG())
     console.log('PASS contact, help, full-hook switch disables inputs and restores overlap, output visibility')
     app.exit(0)

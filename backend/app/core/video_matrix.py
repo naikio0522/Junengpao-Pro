@@ -164,15 +164,25 @@ class VideoMatrixCore:
         self.core_lock = threading.Lock()
 
     def _scan_files(self, dir_path: str, exts: tuple) -> List[str]:
-        if not dir_path or not os.path.exists(dir_path):
-            return []
-        if os.path.isfile(dir_path):
-            return [dir_path] if dir_path.lower().endswith(exts) else []
-        res = []
-        for root, _, files in os.walk(dir_path):
-            for f in files:
-                if f.lower().endswith(exts):
-                    res.append(os.path.join(root, f))
+        # A Hook may be one file, one folder, or several explicitly selected
+        # videos. Preserve folder scanning for existing configurations.
+        paths = [part.strip() for part in (dir_path or '').split(';') if part.strip()]
+        res: List[str] = []
+        seen: set[str] = set()
+        for path in paths:
+            if os.path.isfile(path):
+                candidates = [path] if path.lower().endswith(exts) else []
+            elif os.path.isdir(path):
+                candidates = [os.path.join(root, name)
+                              for root, _, files in os.walk(path)
+                              for name in files if name.lower().endswith(exts)]
+            else:
+                continue
+            for candidate in candidates:
+                key = os.path.normcase(os.path.abspath(candidate))
+                if key not in seen:
+                    seen.add(key)
+                    res.append(candidate)
         return res
 
     @staticmethod
@@ -289,7 +299,8 @@ class VideoMatrixCore:
         return temp_srt_path.replace('\\', '/').replace(':', '\\:').replace("'", "'\\''")
 
     def _preflight_speech_logic(self, cfg: dict, hook_files: List[str], body_files: List[str],
-                                bgm_files: List[str], probe_results: dict) -> Tuple[bool, str]:
+                                bgm_files: List[str], probe_results: dict,
+                                progress_callback: Optional[Callable[[str, int, int], None]] = None) -> Tuple[bool, str]:
         """Plan complete spoken units before the existing FFmpeg renderer runs.
 
         This branch deliberately does not use the fixed-second/random Hook and
@@ -332,7 +343,10 @@ class VideoMatrixCore:
         units_by_file: dict[str, List[dict]] = {}
         skipped = Counter()
         self.semantic_transcripts = []
-        for file_path in dict.fromkeys(hook_files + body_files):
+        source_files = list(dict.fromkeys(hook_files + body_files))
+        for index, file_path in enumerate(source_files):
+            if progress_callback:
+                progress_callback('transcribe', index, len(source_files))
             if not self.is_running:
                 return False, '已停止'
             diagnostic = {
@@ -441,6 +455,8 @@ class VideoMatrixCore:
                 skipped['句段超出视频'] += 1
             else:
                 diagnostic['status'] = 'review'
+        if progress_callback:
+            progress_callback('transcribe', len(source_files), len(source_files))
         strict_failure = ''
         if not units:
             strict_failure = f'没有可用的完整口播句段；逐条诊断：{dict(skipped)}'
@@ -530,8 +546,11 @@ class VideoMatrixCore:
                 [fallback_source(path) for path in body_files],
                 target_product=target_product or '', target_clips=target_clips,
                 strict_failure=strict_failure, max_variants=requested_count,
+                unranked=bool(cfg.get('no_fallback_mix')),
             )
             if not fallback_plans:
+                if cfg.get('no_fallback_mix'):
+                    return False, f'没有同产品可组合的 Hook/Body 视频；已开启“不做保底混剪”，不会跨已识别的产品拼接。{strict_failure}。'
                 return False, f'无可播放的 Hook/Body 视频，无法制作保底草稿；{strict_failure}。'
             capacity = len(fallback_plans)
             self.semantic_plans = fallback_plans[:min(requested_count, capacity)]
@@ -543,11 +562,12 @@ class VideoMatrixCore:
                             '不同的可播放 Hook/Body 组合；未重复或伪造素材凑数')
                 for plan in self.semantic_plans:
                     plan['warnings'].append(shortage)
-            self.log(f'[{self.task_name}] 口播预检：语义编排未通过，已降级为完整原片拼接；'
+            mode_label = '非分级混剪' if cfg.get('no_fallback_mix') else '完整原片保底拼接'
+            self.log(f'[{self.task_name}] 口播预检：语义编排未通过，已降级为{mode_label}；'
                      f'有风险但可渲染，需人工复核；可产出 {capacity} 组。原因：{strict_failure}。')
             for item in first_plan['segments']:
                 diag = diagnostic_by_file[item['file']]
-                self.log(f'[{self.task_name}] 保底选材 {item["role"]}：'
+                self.log(f'[{self.task_name}] {mode_label}选材 {item["role"]}：'
                          f'{os.path.basename(item["file"])}，分级 {diag["status"]}，'
                          f'产品 {item["product_id"] or "未知"}，'
                          f'区间 {item["in_s"]:.2f}–{item["out_s"]:.2f}s；'
@@ -589,10 +609,11 @@ class VideoMatrixCore:
             if not self.bgm_pool:
                 return False, f'所选 BGM 没有足够长的音轨覆盖口播（至少 {needed:.1f} 秒）；请清空 BGM 或换长音频。'
         if first_plan.get('fallback'):
-            return True, f'口播逻辑已降级：有风险但可渲染，需人工复核；可编排 {capacity} 组。'
+            mode_label = '非分级混剪' if cfg.get('no_fallback_mix') else '保底混剪'
+            return True, f'口播逻辑已降级为{mode_label}：有风险但可渲染，需人工复核；可编排 {capacity} 组。'
         return True, f'口播逻辑预检通过：产品 {target_product}，可编排 {capacity} 组。'
 
-    def pre_flight_check(self) -> Tuple[bool, str]:
+    def pre_flight_check(self, progress_callback: Optional[Callable[[str, int, int], None]] = None) -> Tuple[bool, str]:
         self.hook_pool.clear()
         self.hook_cycle.clear()
         self.body_pool.clear()
@@ -646,21 +667,29 @@ class VideoMatrixCore:
         )
         voice_files = self._scan_files(cfg.get('voice_dir', ''), ('.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.opus'))
 
+        if progress_callback:
+            progress_callback('scan', 1, 1)
+
         probe_results = {}
         with concurrent.futures.ThreadPoolExecutor(max_workers=16) as executor:
             all_media = list(set(hook_files + body_files + bgm_files + voice_files))
+            if progress_callback:
+                progress_callback('probe', 0, len(all_media))
             futures = {executor.submit(self.probe_media_cached, f): f for f in all_media}
             for future in concurrent.futures.as_completed(futures):
                 if not self.is_running:
                     return False, "已停止"
                 f_path, dur, has_audio, audio_dur = future.result()
                 probe_results[f_path] = (dur, has_audio, audio_dur)
+                if progress_callback:
+                    progress_callback('probe', len(probe_results), len(all_media))
 
         self.shared.save_state()
 
         if cfg.get('selection_mode') == 'speech_logic':
             return self._preflight_speech_logic(
-                cfg, hook_files, body_files, bgm_files, probe_results
+                cfg, hook_files, body_files, bgm_files, probe_results,
+                progress_callback=progress_callback,
             )
 
         hook_candidate_count = 0
@@ -873,12 +902,13 @@ class VideoMatrixCore:
                 bgm_clip = self.rng.choice(self.bgm_pool) if self.bgm_pool else None
                 voice_clip = None
                 if semantic_plan.get('fallback'):
-                    self.log(f'[{self.task_name}] 口播保底方案 {task_idx}：完整原片拼接，'
+                    mode_label = '非分级方案' if semantic_plan.get('fallback_mode') == 'unranked_clip_level' else '保底方案'
+                    self.log(f'[{self.task_name}] 口播{mode_label} {task_idx}：完整原片拼接，'
                              f'产品 {semantic_plan["product_id"] or "未知"}，'
                              f'成片约 {semantic_plan["duration_s"]:.1f}s；'
                              '有风险但可渲染，需人工复核。')
                     for warning in semantic_plan.get('warnings', []):
-                        self.log(f'[{self.task_name}] 保底风险：{warning}。')
+                        self.log(f'[{self.task_name}] 混剪风险：{warning}。')
                 else:
                     self.log(f'[{self.task_name}] 口播逻辑方案 {task_idx}：产品 {semantic_plan["product_id"]}，原声 {semantic_plan["duration_s"]:.1f}s。')
                 for index, item in enumerate(chosen, 1):

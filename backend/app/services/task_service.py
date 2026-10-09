@@ -59,11 +59,13 @@ class TaskService:
             normalized['_cover_seed'] = random.SystemRandom().randrange(0, 2**63)
 
         if not normalized.get('base_out_dir', '').strip():
-            h_dir = normalized.get('hook_dir', '').rstrip('/\\')
+            h_dir = (normalized.get('hook_dir', '').split(';')[0]).strip().rstrip('/\\')
             parent = os.path.dirname(h_dir) or h_dir
             name = os.path.basename(h_dir) or "VideoMatrix"
             if os.path.isfile(h_dir):
                 name = os.path.splitext(name)[0]
+            if len([part for part in normalized.get('hook_dir', '').split(';') if part.strip()]) > 1:
+                name += '_Multi_Hook'
             normalized['base_out_dir'] = os.path.join(parent, f"{name}_VideoMatrix_Output")
 
         return normalized
@@ -71,12 +73,13 @@ class TaskService:
     def _get_tasks_from_config(self, config: dict) -> List[dict]:
         tasks = []
         h_dir = config['hook_dir'].strip()
+        hook_paths = [part.strip() for part in h_dir.split(';') if part.strip()]
         body_dirs = config.get('body_dirs') or [h_dir]
         out_base = config['base_out_dir'].strip()
         # A single Hook video is a first-class input, not a directory to list.
         sub_folders = (
             [f for f in os.listdir(h_dir) if os.path.isdir(os.path.join(h_dir, f))]
-            if os.path.isdir(h_dir) else []
+            if len(hook_paths) == 1 and os.path.isdir(h_dir) else []
         )
         if sub_folders:
             for sub in sub_folders:
@@ -92,9 +95,12 @@ class TaskService:
                     'out': os.path.join(out_base, sub)
                 })
         else:
-            task_name = os.path.basename(h_dir.rstrip('/\\')) or "Single_Task"
-            if os.path.isfile(h_dir):
+            first_hook = hook_paths[0] if hook_paths else h_dir
+            task_name = os.path.basename(first_hook.rstrip('/\\')) or "Single_Task"
+            if os.path.isfile(first_hook):
                 task_name = os.path.splitext(task_name)[0]
+            if len(hook_paths) > 1:
+                task_name += '_Multi_Hook'
             tasks.append({
                 'name': task_name,
                 'hook_dir': h_dir,
@@ -360,22 +366,45 @@ class TaskService:
     def clear_history(self):
         self.shared_cache.clear_history()
 
-    def preflight(self, config: VideoConfig) -> dict:
+    def preflight(self, config: VideoConfig,
+                  progress_callback: Optional[Callable[[int, str], None]] = None) -> dict:
         raw_config = self._normalize_config(config.model_dump())
         tasks = self._get_tasks_from_config(raw_config)
         if not tasks:
+            if progress_callback:
+                progress_callback(100, '预检结束：找不到素材目录')
             return {"ok": False, "error": "找不到任何素材目录", "report": []}
 
         report = []
         total_capacity = 0
-        for t in tasks:
+        if progress_callback:
+            progress_callback(0, f'待检查 {len(tasks)} 个素材库')
+        for task_index, t in enumerate(tasks):
             task_cfg = raw_config.copy()
             task_cfg['task_name'] = t['name']
             task_cfg['hook_dir'] = t['hook_dir']
             task_cfg['body_dirs'] = t['body_dirs']
             task_cfg['body_groups'] = raw_config.get('body_groups') or []
+
+            def on_core_progress(phase: str, completed: int, total: int):
+                # Percent advances only when scanning, probing or transcription
+                # reports completed work. It never advances on a timer.
+                is_speech = raw_config.get('selection_mode') == 'speech_logic'
+                phase_ranges = {
+                    'scan': (0, 5, '扫描完成'),
+                    'probe': (5, 45 if is_speech else 95, '探测媒体'),
+                    'transcribe': (45, 95, '转录口播'),
+                }
+                start, end, label = phase_ranges[phase]
+                fraction = min(1.0, max(0.0, completed / total)) if total else 1.0
+                local_percent = start + (end - start) * fraction
+                overall = min(99, int((task_index * 100 + local_percent) / len(tasks)))
+                if progress_callback:
+                    progress_callback(overall, f'{t["name"]}：{label} {completed}/{total}')
+
             core = VideoMatrixCore(task_cfg, lambda _x: None, self.shared_cache)
-            ok, msg = core.pre_flight_check()
+            ok, msg = core.pre_flight_check(
+                progress_callback=on_core_progress if progress_callback else None)
             speech_preview = None
             if raw_config.get('selection_mode') == 'speech_logic':
                 first_plan = core.semantic_plans[0] if core.semantic_plans else None
@@ -420,8 +449,13 @@ class TaskService:
                 item['speech_logic_preview'] = speech_preview
             report.append(item)
             core.temp_dir.cleanup()
+            if progress_callback and task_index + 1 < len(tasks):
+                progress_callback(int((task_index + 1) / len(tasks) * 100),
+                                  f'{t["name"]}：检查完成')
 
         cap_text = '充足/无限' if total_capacity > 9000 else total_capacity
+        if progress_callback:
+            progress_callback(100, '全部素材预检完成')
         return {"ok": any(item["ok"] for item in report), "capacity": cap_text, "report": report}
 
     def get_benchmark(self, config: VideoConfig) -> dict:

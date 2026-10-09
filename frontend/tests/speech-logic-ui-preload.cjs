@@ -8,12 +8,13 @@ window.__speechPreflightRequests = []
 window.fetch = async (url, options = {}) => {
   const path = String(url)
   if (path.endsWith('/preflight')) {
-    window.__speechPreflightRequests.push(JSON.parse(options.body))
+    const config = JSON.parse(options.body)
+    window.__speechPreflightRequests.push(config)
     if (window.__speechFallback) {
       return new Response(JSON.stringify({
         ok: true, capacity: 1,
         report: [{ name: '牙膏', ok: true, capacity: 1, message: '有风险但可渲染；需人工复核', speech_logic_preview: {
-          fallback: true, fallback_mode: 'clip_level', sku_id: '', topic_id: '', capacity: 1,
+          fallback: true, fallback_mode: config.no_fallback_mix ? 'unranked_clip_level' : 'clip_level', sku_id: '', topic_id: '', capacity: 1,
           hook_duration_s: 2, hook_segment_count: 1, transcript: '',
           warnings: ['产品无法确认；请核对画面与原声'],
           transcripts: [{ source_file: 'C:\\clips\\hook\\a.mp4', source_type: 'hook', status: 'blocked',
